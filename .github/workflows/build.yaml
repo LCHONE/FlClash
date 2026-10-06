@@ -345,22 +345,111 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Patch delay test timeout to 1 second
+      - name: Patch personal defaults
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          path = Path("lib/common/constant.dart")
-          text = path.read_text()
+          TEST_URL = "https://chatgpt.com/cdn-cgi/trace"
 
-          old = "const delayTestTimeoutDuration = Duration(seconds: 8);"
-          new = "const delayTestTimeoutDuration = Duration(seconds: 1);"
+          def replace_once(file, pattern, replacement, label):
+              path = Path(file)
+              text = path.read_text()
+              new_text, count = re.subn(pattern, replacement, text, count=1)
+              if count != 1:
+                  raise SystemExit(
+                      f"Upstream code changed; could not patch {label} in {file}"
+                  )
+              path.write_text(new_text)
 
-          if old not in text:
-              raise SystemExit("Upstream timeout definition changed")
+          # Manual delay-test behavior:
+          # - 1 second timeout
+          # - 40 UI-side concurrent tests
+          # Core currently allows 50, so this deliberately leaves headroom.
+          replace_once(
+              "lib/common/constant.dart",
+              r"const delayTestTimeoutDuration = Duration\(seconds: \d+\);",
+              "const delayTestTimeoutDuration = Duration(seconds: 1);",
+              "delay test timeout",
+          )
+          replace_once(
+              "lib/common/constant.dart",
+              r"const maxConcurrentDelayTests = \d+;",
+              "const maxConcurrentDelayTests = 40;",
+              "delay test concurrency",
+          )
 
-          path.write_text(text.replace(old, new, 1))
+          # Global delay-test URL, including the Core fallback.
+          replace_once(
+              "lib/common/constant.dart",
+              r"const defaultTestUrl = '[^']+';",
+              f"const defaultTestUrl = '{TEST_URL}';",
+              "Flutter default test URL",
+          )
+          replace_once(
+              "core/common.go",
+              r'defaultTestURL = "[^"]+"',
+              f'defaultTestURL = "{TEST_URL}"',
+              "Core default test URL",
+          )
+
+          # App update checking: default OFF.
+          replace_once(
+              "lib/models/config.dart",
+              r"@Default\(true\)\s+bool autoCheckUpdate,",
+              "@Default(false) bool autoCheckUpdate,",
+              "autoCheckUpdate model default",
+          )
+          replace_once(
+              "lib/models/generated/config.freezed.dart",
+              r"this\.autoCheckUpdate = true",
+              "this.autoCheckUpdate = false",
+              "autoCheckUpdate generated constructor default",
+          )
+
+          # Also force persisted old settings to load as OFF / use our test URL,
+          # so upgrading over an existing FlClash install needs no manual changes.
+          replace_once(
+              "lib/models/generated/config.g.dart",
+              r"testUrl: json\['testUrl'\] as String\? \?\? defaultTestUrl,",
+              "testUrl: defaultTestUrl,",
+              "persisted test URL override",
+          )
+          replace_once(
+              "lib/models/generated/config.g.dart",
+              r"autoCheckUpdate: json\['autoCheckUpdate'\] as bool\? \?\? true,",
+              "autoCheckUpdate: false,",
+              "persisted autoCheckUpdate override",
+          )
+
+          # Unified delay: default OFF.
+          replace_once(
+              "lib/models/clash_config.dart",
+              r"@Default\(true\)\s+@JsonKey\(name: 'unified-delay'\)\s+bool unifiedDelay,",
+              "@Default(false) @JsonKey(name: 'unified-delay') bool unifiedDelay,",
+              "unified-delay model default",
+          )
+          replace_once(
+              "lib/models/generated/clash_config.freezed.dart",
+              r"this\.unifiedDelay = true",
+              "this.unifiedDelay = false",
+              "unified-delay generated constructor default",
+          )
+          replace_once(
+              "lib/models/generated/clash_config.g.dart",
+              r"unifiedDelay: json\['unified-delay'\] as bool\? \?\? true,",
+              "unifiedDelay: false,",
+              "persisted unified-delay override",
+          )
+
+          print("Applied personal FlClash settings:")
+          print("  delay timeout       = 1 second")
+          print("  UI test concurrency = 40")
+          print(f"  global test URL     = {TEST_URL}")
+          print("  auto app update     = off")
+          print("  unified delay       = off")
           PY
 
       - name: Setup Android Signing
