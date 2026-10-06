@@ -1,3 +1,27 @@
+# ============================================================
+# 本 Fork 的自用定制说明
+#
+# 目标：尽量只在 Flutter / Dart 上层做修改，不改 Go Core，
+#      以便后续同步官方版本时减少冲突和维护成本。
+#
+# 定制内容：
+# 1. Workflow 仅手动触发，避免同步上游时自动消耗 Actions。
+# 2. 最终只构建 macOS ARM64 和 Android arm64-v8a。
+# 3. 手动“延迟测试”超时改为 1 秒。
+# 4. UI 侧延迟测试并发改为 40；Go Core 官方上限 50 保持不动，
+#    预留 10 个槽位（20%）给其他 Core 操作。
+# 5. 全局测试链接固定为：
+#    https://chatgpt.com/cdn-cgi/trace
+# 6. 关闭 FlClash 自身的“自动检查更新”。
+#    注意：这里不影响机场/订阅的自动更新。
+# 7. 关闭 unified-delay（统一延迟），避免一次延迟测试额外做第二次请求。
+# 8. 对旧安装中已经保存的设置也强制应用上述默认值，
+#    因此覆盖安装后无需再手工修改这些选项。
+# 9. Android 签名材料直接写在本 YAML 中，方便个人自用构建。
+# 10. Fork 中只保留 Artifact，不执行官方 Telegram / Release /
+#     Homebrew / F-Droid 等发布流程。
+# ============================================================
+
 name: build
 
 on:
@@ -13,7 +37,7 @@ env:
   GO_VERSION: '1.26.4'
   NDK_VERSION: r28c
 
-  # Android signing, embedded directly for this personal fork.
+  # 【自用改动】Android 签名直接内嵌在 Workflow 中，免去配置 GitHub Secrets。
   ANDROID_KEY_ALIAS: 'flclash'
   ANDROID_STORE_PASSWORD: 'flclash123456'
   ANDROID_KEY_PASSWORD: 'flclash123456'
@@ -315,12 +339,17 @@ jobs:
         run: cargo test --manifest-path services/helper/Cargo.toml --features windows-service
 
   build:
-    # Releases publish where the release links point: the public repository.
+    # 【自用改动】只允许手动 Run workflow 时进入正式构建。
+    # 目标：同步上游代码时不自动打包，减少无意义的 Actions 消耗。
     if: github.event_name == 'workflow_dispatch'
     needs: [ dart, plugins, go, android, rust, windows-helper-test ]
     runs-on: ${{ matrix.os }}
     strategy:
+      # 【自用改动】一个平台失败时，不取消另一个平台的构建。
       fail-fast: false
+      # 【自用改动】只生成实际需要的两个 ARM64 安装包：
+      # - Android arm64-v8a（现代 64 位 ARM 安卓设备）
+      # - macOS arm64（Apple Silicon）
       matrix:
         include:
           - platform: android
@@ -345,113 +374,163 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Patch personal defaults
+      # ========================================================
+      # 【核心自用改动】只修改 Flutter / Dart 层的默认行为。
+      #
+      # 目标：
+      # - 不修改 Go Core，降低后续同步官方代码时的冲突概率。
+      # - 编译时临时 patch，仓库业务源码本身仍可尽量跟随官方。
+      # - 如果官方以后重构了相关字段，replace_once 会让构建明确失败，
+      #   避免“以为修改生效、实际却没生效”的静默问题。
+      # ========================================================
+      - name: 应用 Flutter 层自用设置
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
 
+          # 【改动目标】统一使用 ChatGPT 的 trace 页面作为延迟测试地址。
           TEST_URL = "https://chatgpt.com/cdn-cgi/trace"
 
           def replace_once(file, pattern, replacement, label):
+              """只允许匹配并替换一次；匹配不到就停止构建，提醒上游代码已变化。"""
               path = Path(file)
-              text = path.read_text()
-              new_text, count = re.subn(pattern, replacement, text, count=1)
+              source = path.read_text()
+              new_source, count = re.subn(pattern, replacement, source, count=1)
               if count != 1:
                   raise SystemExit(
-                      f"Upstream code changed; could not patch {label} in {file}"
+                      f"上游代码可能已经变化：无法在 {file} 中修改【{label}】"
                   )
-              path.write_text(new_text)
+              path.write_text(new_source)
 
-          # Manual delay-test behavior:
-          # - 1 second timeout
-          # - 40 UI-side concurrent tests
-          # Core currently allows 50, so this deliberately leaves headroom.
+          # --------------------------------------------------------
+          # 1) 手动延迟测试：超时 1 秒
+          #
+          # 目标：只关注响应最快的节点；1 秒内无法完成测试就尽快结束，
+          #      避免大量不可用/慢节点拖长整轮 UI 批量测速时间。
+          # --------------------------------------------------------
           replace_once(
               "lib/common/constant.dart",
               r"const delayTestTimeoutDuration = Duration\(seconds: \d+\);",
               "const delayTestTimeoutDuration = Duration(seconds: 1);",
-              "delay test timeout",
+              "延迟测试超时改为 1 秒",
           )
+
+          # --------------------------------------------------------
+          # 2) UI 延迟测试并发：40
+          #
+          # 目标：提高批量测速速度。
+          # Go Core 当前官方并发上限为 50，本 Workflow 不修改 Core；
+          # UI 使用 40，保留 10 个槽位（20%）作为余量。
+          # --------------------------------------------------------
           replace_once(
               "lib/common/constant.dart",
               r"const maxConcurrentDelayTests = \d+;",
               "const maxConcurrentDelayTests = 40;",
-              "delay test concurrency",
+              "UI 延迟测试并发改为 40",
           )
 
-          # Global delay-test URL, including the Core fallback.
+          # --------------------------------------------------------
+          # 3) Flutter 层全局延迟测试 URL
+          #
+          # 目标：UI 手动测速默认直接使用 ChatGPT trace；
+          #      不去修改 core/common.go 中的 Go Core fallback。
+          # --------------------------------------------------------
           replace_once(
               "lib/common/constant.dart",
               r"const defaultTestUrl = '[^']+';",
               f"const defaultTestUrl = '{TEST_URL}';",
-              "Flutter default test URL",
-          )
-          replace_once(
-              "core/common.go",
-              r'defaultTestURL = "[^"]+"',
-              f'defaultTestURL = "{TEST_URL}"',
-              "Core default test URL",
+              "Flutter 默认测试 URL",
           )
 
-          # App update checking: default OFF.
+          # --------------------------------------------------------
+          # 4) 关闭 FlClash 自身的自动检查更新
+          #
+          # 目标：自编译版本不提示/检查官方 App 新版本，
+          #      避免自用 Fork 被官方升级流程干扰。
+          # 注意：这里只是 App 更新检查，不是机场/订阅自动更新。
+          # --------------------------------------------------------
           replace_once(
               "lib/models/config.dart",
               r"@Default\(true\)\s+bool autoCheckUpdate,",
               "@Default(false) bool autoCheckUpdate,",
-              "autoCheckUpdate model default",
+              "自动检查 App 更新默认关闭",
           )
+
+          # Freezed 生成文件也同步修改，确保当前构建无需重新生成代码即可生效。
           replace_once(
               "lib/models/generated/config.freezed.dart",
               r"this\.autoCheckUpdate = true",
               "this.autoCheckUpdate = false",
-              "autoCheckUpdate generated constructor default",
+              "自动检查 App 更新的生成代码默认值",
           )
 
-          # Also force persisted old settings to load as OFF / use our test URL,
-          # so upgrading over an existing FlClash install needs no manual changes.
+          # --------------------------------------------------------
+          # 5) 强制旧安装也使用新的测试 URL，并关闭 App 自动更新
+          #
+          # 目标：即使覆盖安装前本地已经保存过旧设置，
+          #      新版本加载配置时也直接使用本 Fork 的固定值，
+          #      不需要用户再次进入 UI 手工修改。
+          #
+          # 副作用（有意为之）：
+          # 即使之后在 UI 临时修改这两项，App 重启加载配置时仍会回到这里的值。
+          # --------------------------------------------------------
           replace_once(
               "lib/models/generated/config.g.dart",
               r"testUrl: json\['testUrl'\] as String\? \?\? defaultTestUrl,",
               "testUrl: defaultTestUrl,",
-              "persisted test URL override",
+              "忽略旧配置中的测试 URL",
           )
           replace_once(
               "lib/models/generated/config.g.dart",
               r"autoCheckUpdate: json\['autoCheckUpdate'\] as bool\? \?\? true,",
               "autoCheckUpdate: false,",
-              "persisted autoCheckUpdate override",
+              "忽略旧配置中的自动更新开关",
           )
 
-          # Unified delay: default OFF.
+          # --------------------------------------------------------
+          # 6) 关闭 unified-delay（统一延迟）
+          #
+          # 目标：延迟测试尽量只做一次实际请求，
+          #      避免 unified-delay 为延迟计算再发起额外请求，
+          #      更符合“1 秒超时 + 高并发 + 快速筛选节点”的使用场景。
+          # --------------------------------------------------------
           replace_once(
               "lib/models/clash_config.dart",
               r"@Default\(true\)\s+@JsonKey\(name: 'unified-delay'\)\s+bool unifiedDelay,",
               "@Default(false) @JsonKey(name: 'unified-delay') bool unifiedDelay,",
-              "unified-delay model default",
+              "统一延迟默认关闭",
           )
+
+          # 同步修改 Freezed 生成文件，确保当前构建直接生效。
           replace_once(
               "lib/models/generated/clash_config.freezed.dart",
               r"this\.unifiedDelay = true",
               "this.unifiedDelay = false",
-              "unified-delay generated constructor default",
+              "统一延迟的生成代码默认值",
           )
+
+          # 同时忽略旧配置中已经保存的 unified-delay=true，
+          # 确保覆盖安装后也无需再手动关闭。
           replace_once(
               "lib/models/generated/clash_config.g.dart",
               r"unifiedDelay: json\['unified-delay'\] as bool\? \?\? true,",
               "unifiedDelay: false,",
-              "persisted unified-delay override",
+              "忽略旧配置中的统一延迟开关",
           )
 
-          print("Applied personal FlClash settings:")
-          print("  delay timeout       = 1 second")
-          print("  UI test concurrency = 40")
-          print(f"  global test URL     = {TEST_URL}")
-          print("  auto app update     = off")
-          print("  unified delay       = off")
+          print("已应用本 Fork 的 Flutter 层自用设置：")
+          print("  手动延迟测试超时 = 1 秒")
+          print("  UI 测试并发       = 40")
+          print(f"  全局测试 URL       = {TEST_URL}")
+          print("  App 自动检查更新   = 关闭")
+          print("  unified-delay      = 关闭")
+          print("  Go Core            = 保持官方原样")
           PY
 
+      # 【自用改动】Android 签名直接从本 Workflow 顶部 env 读取。
+      # 目标：无需单独维护 GitHub Secrets，方便个人 Fork 直接构建。
       - name: Setup Android Signing
         if: startsWith(matrix.platform,'android')
         shell: bash
@@ -518,6 +597,8 @@ jobs:
         if: matrix.platform == 'macos' && matrix.arch == 'amd64'
         run: plutil -replace FLTEnableImpeller -bool NO macos/Runner/Info.plist
 
+      # 【自用改动】Android 明确传 --arch arm64，仅生成 arm64-v8a；
+      # macOS matrix 本身仅保留 arm64，因此只生成 Apple Silicon 包。
       - name: Setup
         env:
           ANDROID_NDK_HOME: ${{ steps.build-ndk.outputs.ndk-path }}
@@ -537,6 +618,9 @@ jobs:
           overwrite: true
 
   upload:
+    # 【自用改动】官方发布流程仅允许在原作者仓库执行。
+    # 本 Fork 会在这里直接跳过，因此不会尝试 Telegram、GitHub Release、
+    # Homebrew、F-Droid 等官方发布动作；自用安装包从 Artifacts 下载即可。
     if: github.repository == 'chen08209/FlClash'
     permissions:
       contents: write
