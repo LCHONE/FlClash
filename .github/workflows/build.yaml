@@ -37,6 +37,8 @@
 # - 不直接提交业务源码改动；每次 Actions 构建时临时 patch。
 # - 修改 Freezed / JSON 模型后运行 build_runner，
 #   不手工维护 generated 模型文件。
+# - 测速超时/并发使用 Flutter 运行时变量实现，不修改
+#   asyncTestDelay 接口，也不依赖搜索调用点。
 # - 如果官方以后重构相关代码，patch 找不到目标时主动失败。
 #
 # 为了加速，本 Workflow 刻意移除了官方 CI 中的：
@@ -135,10 +137,40 @@ jobs:
                   )
               write(path, target)
 
-          # ------------------------------------------------------
-          # A. Flutter 层默认测速 URL。
-          # Go Core 的 fallback 保持官方原样。
-          # ------------------------------------------------------
+          # ==============================================================
+          # 设计说明
+          #
+          # 上一版通过修改 asyncTestDelay 接口并搜索调用点；当前上游的
+          # 调用点不在 providers/actions 中，所以这种方式过度依赖目录结构。
+          #
+          # 本版只在 Flutter 层把两个原有 const 改成运行时变量：
+          # - 原来的测速代码仍旧读取 delayTestTimeoutDuration
+          # - 原来的批量调度仍旧读取 maxConcurrentDelayTests
+          # - UI 修改时立即更新变量
+          # - App 启动/恢复配置时从持久化值同步变量
+          #
+          # 因此不改 asyncTestDelay、不搜索调用点、不改 Go Core。
+          # ==============================================================
+
+          # A. Flutter 层测速运行时参数。
+          replace_once(
+              'lib/common/constant.dart',
+              r'const delayTestTimeoutDuration = Duration\(seconds: \d+\);',
+              (
+                  'Duration delayTestTimeoutDuration = '
+                  'const Duration(milliseconds: 500);'
+              ),
+              '测速超时改为可运行时修改，默认 500ms',
+          )
+
+          replace_once(
+              'lib/common/constant.dart',
+              r'const maxConcurrentDelayTests = \d+;',
+              'int maxConcurrentDelayTests = 40;',
+              '测速并发改为可运行时修改，默认 40',
+          )
+
+          # Flutter 层默认测速 URL；Go Core fallback 保持官方原样。
           replace_once(
               'lib/common/constant.dart',
               r"const defaultTestUrl = '[^']+';",
@@ -146,21 +178,16 @@ jobs:
               'Flutter 默认测速 URL',
           )
 
-          # ------------------------------------------------------
-          # B. AppSettingProps 新增两个持久化设置。
-          #
-          # delayTestTimeoutMs:
-          #   默认 500 ms，UI 只校验整数且 > 0。
-          #
-          # delayTestConcurrency:
-          #   默认 40，UI 限制 1～50。
-          # ------------------------------------------------------
+          # B. AppSettingProps 增加两个持久化字段。
           config_path = 'lib/models/config.dart'
           config_source = read(config_path)
 
-          if 'delayTestTimeoutMs' in config_source or 'delayTestConcurrency' in config_source:
+          if (
+              'delayTestTimeoutMs' in config_source
+              or 'delayTestConcurrency' in config_source
+          ):
               raise SystemExit(
-                  '上游 AppSettingProps 已经存在测速设置字段，请人工确认后再调整 patch'
+                  '上游 AppSettingProps 已存在测速设置字段，请人工确认 patch'
               )
 
           model_pattern = re.compile(
@@ -170,14 +197,16 @@ jobs:
           match = model_pattern.search(config_source)
           if match is None:
               raise SystemExit(
-                  '上游代码可能已经变化：找不到 AppSettingProps.testUrl 定义'
+                  '上游代码可能已经变化：找不到 AppSettingProps.testUrl'
               )
 
           indent = match.group('indent')
           model_fields = (
               match.group(0)
-              + f'\n{indent}@Default({DEFAULT_TIMEOUT_MS}) int delayTestTimeoutMs,'
-              + f'\n{indent}@Default({DEFAULT_CONCURRENCY}) int delayTestConcurrency,'
+              + f'\n{indent}@Default({DEFAULT_TIMEOUT_MS}) '
+                'int delayTestTimeoutMs,'
+              + f'\n{indent}@Default({DEFAULT_CONCURRENCY}) '
+                'int delayTestConcurrency,'
           )
           config_source = (
               config_source[:match.start()]
@@ -186,9 +215,7 @@ jobs:
           )
           write(config_path, config_source)
 
-          # ------------------------------------------------------
-          # C. FlClash 自身自动检查 App 更新默认关闭。
-          # ------------------------------------------------------
+          # FlClash 自身自动检查 App 更新默认关闭。
           replace_once(
               'lib/models/config.dart',
               r'@Default\(true\)\s+bool autoCheckUpdate,',
@@ -196,36 +223,41 @@ jobs:
               '自动检查 App 更新默认关闭',
           )
 
-          # ------------------------------------------------------
-          # D. unified-delay 默认关闭。
-          # ------------------------------------------------------
+          # unified-delay 默认关闭。
           replace_once(
               'lib/models/clash_config.dart',
-              r"@Default\(true\)\s+@JsonKey\(name: 'unified-delay'\)"
-              r"\s+bool unifiedDelay,",
-              "@Default(false) @JsonKey(name: 'unified-delay') bool unifiedDelay,",
+              (
+                  r"@Default\(true\)\s+"
+                  r"@JsonKey\(name: 'unified-delay'\)\s+"
+                  r"bool unifiedDelay,"
+              ),
+              (
+                  "@Default(false) "
+                  "@JsonKey(name: 'unified-delay') "
+                  "bool unifiedDelay,"
+              ),
               '统一延迟默认关闭',
           )
 
-          # ------------------------------------------------------
-          # E. 在“测速链接”下面增加两个 UI 输入框。
-          # ------------------------------------------------------
+          # C. 在“测速链接”下面增加两个输入框。
           general_path = 'lib/views/config/general.dart'
           general_source = read(general_path)
 
           if 'class DelayTestTimeoutItem' in general_source:
-              raise SystemExit('上游 UI 已经存在 DelayTestTimeoutItem，请人工确认')
+              raise SystemExit(
+                  '上游 UI 已存在 DelayTestTimeoutItem，请人工确认 patch'
+              )
 
           widgets = r'''
           class DelayTestTimeoutItem extends ConsumerWidget {
             const DelayTestTimeoutItem({super.key});
-          
+
             @override
             Widget build(BuildContext context, ref) {
               final timeoutMs = ref.watch(
                 appSettingProvider.select((state) => state.delayTestTimeoutMs),
               );
-          
+
               return ListItem.input(
                 leading: const Icon(Icons.timer_outlined),
                 title: const Text('测速超时'),
@@ -249,6 +281,10 @@ jobs:
                     return;
                   }
                   final intValue = int.parse(value);
+
+                  // 立即影响下一轮手动测速，无需重启 Core。
+                  delayTestTimeoutDuration = Duration(milliseconds: intValue);
+
                   ref
                       .read(appSettingProvider.notifier)
                       .update(
@@ -258,16 +294,16 @@ jobs:
               );
             }
           }
-          
+
           class DelayTestConcurrencyItem extends ConsumerWidget {
             const DelayTestConcurrencyItem({super.key});
-          
+
             @override
             Widget build(BuildContext context, ref) {
               final concurrency = ref.watch(
                 appSettingProvider.select((state) => state.delayTestConcurrency),
               );
-          
+
               return ListItem.input(
                 leading: const Icon(Icons.tune),
                 title: const Text('测速并发'),
@@ -291,22 +327,29 @@ jobs:
                     return;
                   }
                   final intValue = int.parse(value);
+                  final normalized = intValue.clamp(1, 50).toInt();
+
+                  // 立即影响下一轮批量测速；Go Core 的 50 上限保持不动。
+                  maxConcurrentDelayTests = normalized;
+
                   ref
                       .read(appSettingProvider.notifier)
                       .update(
-                        (state) => state.copyWith(delayTestConcurrency: intValue),
+                        (state) => state.copyWith(
+                          delayTestConcurrency: normalized,
+                        ),
                       );
                 },
               );
             }
           }
-          
+
           '''
 
           marker = 'class PortItem extends ConsumerWidget {'
           if general_source.count(marker) != 1:
               raise SystemExit(
-                  '上游代码可能已经变化：无法确定测速设置 UI 的插入位置'
+                  '上游代码可能已经变化：无法确定测速设置 UI 插入位置'
               )
           general_source = general_source.replace(
               marker,
@@ -321,210 +364,82 @@ jobs:
               )
           general_source = general_source.replace(
               test_url_item,
-              test_url_item
-              + '\n          const DelayTestTimeoutItem(),'
-              + '\n          const DelayTestConcurrencyItem(),',
+              (
+                  test_url_item
+                  + '\n          const DelayTestTimeoutItem(),'
+                  + '\n          const DelayTestConcurrencyItem(),'
+              ),
               1,
           )
           write(general_path, general_source)
 
-          # ------------------------------------------------------
-          # F. asyncTestDelay 支持从 Flutter 调用者接收 timeoutMs。
-          # 我们的批量测速会显式传 UI 设置；其他未显式传值的调用点
-          # 默认使用 500ms，提高对上游代码变化的兼容性。
-          # 仍然只是 Dart → Core 的参数传递，不修改 Go Core。
-          # ------------------------------------------------------
-          interface_path = 'lib/core/interface.dart'
+          # D. App 启动/恢复配置时同步运行时变量。
+          provider_path = 'lib/providers/config.dart'
+          provider_source = read(provider_path)
 
-          replace_once(
-              interface_path,
-              r'Future<Delay\?> asyncTestDelay\(String url, String proxyName\);',
-              (
-                  'Future<Delay?> asyncTestDelay(\n'
-                  '    String url,\n'
-                  '    String proxyName, {\n'
-                  '    int timeoutMs = 500,\n'
-                  '  });'
-              ),
-              'asyncTestDelay 接口增加 timeoutMs',
-          )
-
-          replace_once(
-              interface_path,
-              (
-                  r'Future<Delay\?> asyncTestDelay'
-                  r'\(String url, String proxyName\) async \{'
-              ),
-              (
-                  'Future<Delay?> asyncTestDelay(\n'
-                  '    String url,\n'
-                  '    String proxyName, {\n'
-                  '    int timeoutMs = 500,\n'
-                  '  }) async {'
-              ),
-              'asyncTestDelay 实现增加 timeoutMs',
-          )
-
-          replace_once(
-              interface_path,
-              r"'timeout':\s*delayTestTimeoutDuration\.inMilliseconds,",
-              "'timeout': timeoutMs,",
-              'Core 调用使用 UI 配置的 timeoutMs',
-          )
-
-          # ------------------------------------------------------
-          # G. ProxiesAction 使用动态 timeout / concurrency。
-          #
-          # 不写死具体 action 文件名，而是在 providers/actions 中搜索，
-          # 这样对上游的小幅文件拆分更耐受。
-          # ------------------------------------------------------
-          actions_dir = Path('lib/providers/actions')
-          action_files = list(actions_dir.rglob('*.dart'))
-          if not action_files:
-              raise SystemExit('找不到 lib/providers/actions 下的 Dart 文件')
-
-          # G1. 动态并发。
-          # 运行时再 clamp 到 1～50，防止本地 JSON 被手工改坏后
-          # UI 侧突破 Go Core 的官方 50 上限。
-          concurrency_expr = (
-              'ref.read(appSettingProvider).delayTestConcurrency'
-              '.clamp(1, 50).toInt()'
-          )
-          concurrency_replacements = 0
-
-          for path in action_files:
-              source = path.read_text()
-              if 'maxConcurrentDelayTests' not in source:
-                  continue
-              source, count = re.subn(
-                  r'\bmaxConcurrentDelayTests\b',
-                  concurrency_expr,
-                  source,
-              )
-              if count:
-                  concurrency_replacements += count
-                  path.write_text(source)
-
-          if concurrency_replacements == 0:
+          if '_syncDelayTestSettings' in provider_source:
               raise SystemExit(
-                  '上游代码可能已经变化：在 providers/actions 中'
-                  '找不到 maxConcurrentDelayTests'
+                  '上游 providers/config.dart 已存在测速同步逻辑，请人工确认'
               )
 
-          # G2. 动态超时。
-          # 给 ProxiesAction 中所有 asyncTestDelay 调用追加 timeoutMs。
-          def matching_paren(source, open_index):
-              depth = 0
-              quote = None
-              escaped = False
+          helper = r'''
+          void _syncDelayTestSettings(AppSettingProps settings) {
+            delayTestTimeoutDuration = Duration(
+              milliseconds: settings.delayTestTimeoutMs,
+            );
+            maxConcurrentDelayTests =
+                settings.delayTestConcurrency.clamp(1, 50).toInt();
+          }
 
-              for index in range(open_index, len(source)):
-                  char = source[index]
+          '''
 
-                  if quote is not None:
-                      if escaped:
-                          escaped = False
-                      elif char == '\\':
-                          escaped = True
-                      elif char == quote:
-                          quote = None
-                      continue
-
-                  if char in ("'", '"'):
-                      quote = char
-                      continue
-
-                  if char == '(':
-                      depth += 1
-                  elif char == ')':
-                      depth -= 1
-                      if depth == 0:
-                          return index
-
-              return None
-
-          timeout_argument = (
-              'timeoutMs: '
-              'ref.read(appSettingProvider).delayTestTimeoutMs'
-          )
-          timeout_call_count = 0
-
-          for path in action_files:
-              source = path.read_text()
-              matches = list(
-                  re.finditer(r'\.asyncTestDelay\s*\(', source)
-              )
-              if not matches:
-                  continue
-
-              # 从后往前插入，避免前面的插入改变后续 match 的位置。
-              for match in reversed(matches):
-                  open_index = source.find('(', match.start())
-                  close_index = matching_paren(source, open_index)
-                  if close_index is None:
-                      raise SystemExit(
-                          f'无法解析 {path} 中的 asyncTestDelay 调用'
-                      )
-
-                  body = source[open_index + 1:close_index]
-                  if 'timeoutMs:' in body:
-                      continue
-
-                  stripped = body.rstrip()
-                  trailing = body[len(stripped):]
-
-                  if '\n' in body:
-                      line_start = source.rfind('\n', 0, close_index) + 1
-                      close_indent = re.match(
-                          r'[ \t]*',
-                          source[line_start:close_index],
-                      ).group(0)
-                      arg_indent = close_indent + '  '
-                      separator = '' if stripped.endswith(',') else ','
-                      new_body = (
-                          stripped
-                          + separator
-                          + '\n'
-                          + arg_indent
-                          + timeout_argument
-                          + ','
-                          + trailing
-                      )
-                  else:
-                      separator = '' if stripped.endswith(',') else ','
-                      new_body = (
-                          stripped
-                          + separator
-                          + ' '
-                          + timeout_argument
-                          + trailing
-                      )
-
-                  source = (
-                      source[:open_index + 1]
-                      + new_body
-                      + source[close_index:]
-                  )
-                  timeout_call_count += 1
-
-              path.write_text(source)
-
-          if timeout_call_count == 0:
+          write_marker = 'void writeConfig(Ref ref, Config config) {'
+          if provider_source.count(write_marker) != 1:
               raise SystemExit(
-                  '上游代码可能已经变化：在 providers/actions 中'
-                  '找不到 asyncTestDelay 调用'
+                  '上游代码可能已经变化：找不到 writeConfig'
               )
+
+          provider_source = provider_source.replace(
+              write_marker,
+              (
+                  helper
+                  + write_marker
+                  + '\n  _syncDelayTestSettings(config.appSettingProps);'
+              ),
+              1,
+          )
+
+          override_marker = 'List<Override> buildConfigOverrides(Config config) {'
+          if provider_source.count(override_marker) != 1:
+              raise SystemExit(
+                  '上游代码可能已经变化：找不到 buildConfigOverrides'
+              )
+
+          provider_source = provider_source.replace(
+              override_marker,
+              (
+                  override_marker
+                  + '\n  _syncDelayTestSettings(config.appSettingProps);'
+              ),
+              1,
+          )
+
+          write(provider_path, provider_source)
 
           print('Flutter/Dart 源码 patch 完成：')
-          print(f'  测速超时默认值 = {DEFAULT_TIMEOUT_MS} ms，可在 UI 修改，要求 > 0')
+          print(
+              f'  测速超时默认值 = {DEFAULT_TIMEOUT_MS} ms，'
+              'UI 可修改，只要求 > 0'
+          )
           print(
               f'  测速并发默认值 = {DEFAULT_CONCURRENCY}，'
-              f'UI/运行时范围 1～{MAX_CONCURRENCY}'
+              f'UI / 运行时范围 1～{MAX_CONCURRENCY}'
           )
           print(f'  默认测速 URL   = {TEST_URL}')
           print('  App 自动更新   = 关闭')
           print('  unified-delay  = 关闭')
           print('  Go Core        = 完全不修改')
+          print('  asyncTestDelay = 接口和调用点完全不修改')
           PY
 
       # ----------------------------------------------------------
@@ -698,8 +613,7 @@ jobs:
             lib/models/config.dart \
             lib/models/clash_config.dart \
             lib/views/config/general.dart \
-            lib/core/interface.dart \
-            lib/providers/actions
+            lib/providers/config.dart
 
       # ----------------------------------------------------------
       # 14. 正式构建
