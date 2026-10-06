@@ -13,6 +13,14 @@ env:
   GO_VERSION: "1.26.4"
   NDK_VERSION: r28c
 
+  # Android signing: hard-coded here for convenience.
+  # Replace the placeholders below before running the workflow.
+  ANDROID_KEY_ALIAS: "flclash"
+  ANDROID_STORE_PASSWORD: "CHANGE_ME"
+  ANDROID_KEY_PASSWORD: "CHANGE_ME"
+  ANDROID_KEYSTORE_BASE64: >-
+    PASTE_YOUR_BASE64_KEYSTORE_HERE
+
 jobs:
   dart:
     name: Dart
@@ -357,12 +365,13 @@ jobs:
 
       - name: Setup Android Signing
         if: startsWith(matrix.platform,'android')
+        shell: bash
         run: |
-          echo "${{ secrets.KEYSTORE }}" | base64 --decode > android/app/keystore.jks
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/keystore.jks
           {
-            echo "keyAlias=${{ secrets.KEY_ALIAS }}"
-            echo "storePassword=${{ secrets.STORE_PASSWORD }}"
-            echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "storePassword=$ANDROID_STORE_PASSWORD"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
           } >> android/local.properties
 
       - name: Setup Go
