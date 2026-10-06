@@ -9,17 +9,16 @@ concurrency:
 
 env:
   IS_STABLE: ${{ !contains(github.ref, '-') }}
-  FLUTTER_VERSION: "3.47.4"
-  GO_VERSION: "1.26.4"
+  FLUTTER_VERSION: '3.47.4'
+  GO_VERSION: '1.26.4'
   NDK_VERSION: r28c
 
-  # Android signing: hard-coded here for convenience.
-  # Replace the placeholders below before running the workflow.
-  ANDROID_KEY_ALIAS: "flclash"
-  ANDROID_STORE_PASSWORD: "CHANGE_ME"
-  ANDROID_KEY_PASSWORD: "CHANGE_ME"
+  # Android signing, embedded directly for this personal fork.
+  ANDROID_KEY_ALIAS: 'flclash'
+  ANDROID_STORE_PASSWORD: 'flclash123456'
+  ANDROID_KEY_PASSWORD: 'flclash123456'
   ANDROID_KEYSTORE_BASE64: >-
-    PASTE_YOUR_BASE64_KEYSTORE_HERE
+    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
 
 jobs:
   dart:
@@ -248,7 +247,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -318,9 +317,10 @@ jobs:
   build:
     # Releases publish where the release links point: the public repository.
     if: github.event_name == 'workflow_dispatch'
-    needs: [dart, plugins, go, android, rust, windows-helper-test]
+    needs: [ dart, plugins, go, android, rust, windows-helper-test ]
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: android
@@ -451,7 +451,7 @@ jobs:
     if: github.repository == 'chen08209/FlClash'
     permissions:
       contents: write
-    needs: [build]
+    needs: [ build ]
     runs-on: ubuntu-latest
     services:
       telegram-bot-api:
@@ -529,7 +529,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ./dist/*
-          body_path: "./release.md"
+          body_path: './release.md'
 
       - name: Create Homebrew Cask Source Dir
         if: ${{ env.IS_STABLE == 'true' }}
@@ -554,8 +554,8 @@ jobs:
           source-directory: ./brew/
           destination-github-username: chen08209
           destination-repository-name: homebrew-tap
-          user-name: "chen08029"
-          user-email: "chen08209@gmail.com"
+          user-name: 'chen08029'
+          user-email: 'chen08209@gmail.com'
           target-branch: main
           commit-message: Update Homebrew cask from ${{ github.ref_name }}
           target-directory: /
@@ -576,8 +576,8 @@ jobs:
           source-directory: ./tmp/
           destination-github-username: chen08209
           destination-repository-name: FlClash-fdroid-repo
-          user-name: "chen08029"
-          user-email: "chen08209@gmail.com"
+          user-name: 'chen08029'
+          user-email: 'chen08209@gmail.com'
           target-branch: main
           commit-message: Update from ${{ github.ref_name }}
           target-directory: /tmp/
