@@ -1,25 +1,30 @@
 # ============================================================
-# 本 Fork 的自用定制说明
+# FlClash 自用极简构建 Workflow
 #
-# 目标：尽量只在 Flutter / Dart 上层做修改，不改 Go Core，
-#      以便后续同步官方版本时减少冲突和维护成本。
+# 设计目标：
+# 1. 只保留“真正生成安装包”需要的步骤，不跑官方完整 CI 测试矩阵。
+# 2. 仅手动触发；同步上游代码后，由自己点击 Run workflow 构建。
+# 3. 只构建：
+#    - macOS ARM64（Apple Silicon）
+#    - Android arm64-v8a
+# 4. 尽量只修改 Flutter / Dart 上层，不改 Go Core。
 #
-# 定制内容：
-# 1. Workflow 仅手动触发，避免同步上游时自动消耗 Actions。
-# 2. 最终只构建 macOS ARM64 和 Android arm64-v8a。
-# 3. 手动“延迟测试”超时改为 1 秒。
-# 4. UI 侧延迟测试并发改为 40；Go Core 官方上限 50 保持不动，
-#    预留 10 个槽位（20%）给其他 Core 操作。
-# 5. 全局测试链接固定为：
-#    https://chatgpt.com/cdn-cgi/trace
-# 6. 关闭 FlClash 自身的“自动检查更新”。
-#    注意：这里不影响机场/订阅的自动更新。
-# 7. 关闭 unified-delay（统一延迟），避免一次延迟测试额外做第二次请求。
-# 8. 对旧安装中已经保存的设置也强制应用上述默认值，
-#    因此覆盖安装后无需再手工修改这些选项。
-# 9. Android 签名材料直接写在本 YAML 中，方便个人自用构建。
-# 10. Fork 中只保留 Artifact，不执行官方 Telegram / Release /
-#     Homebrew / F-Droid 等发布流程。
+# 自用功能改动：
+# - UI 手动延迟测试超时：1 秒
+# - UI 批量延迟测试并发：40
+#   （Go Core 官方上限 50 不动，预留 10 个槽位 / 20% 余量）
+# - 全局测速链接：https://chatgpt.com/cdn-cgi/trace
+# - 关闭 FlClash 自身“自动检查更新”
+#   （不影响机场/订阅更新）
+# - 关闭 unified-delay（统一延迟）
+# - 对已经存在的旧本地设置也强制应用以上三个配置，
+#   覆盖安装后无需再次手动修改
+#
+# 为了加速，本 Workflow 刻意移除了官方 CI 中的：
+# Dart / Plugin / Desktop Debug / Go / Android Unit / Rust /
+# Windows Helper 等前置检查。
+# 这些是上游开发质量检查，不是生成自用安装包的必要步骤。
+# 真正编译失败时，下面的正式 Build 仍然会直接报错。
 # ============================================================
 
 name: build
@@ -27,17 +32,17 @@ name: build
 on:
   workflow_dispatch:
 
+# 如果误点多次，只保留最新一次构建，避免浪费 Actions 时间。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+  cancel-in-progress: true
 
 env:
-  IS_STABLE: ${{ !contains(github.ref, '-') }}
   FLUTTER_VERSION: '3.47.4'
   GO_VERSION: '1.26.4'
   NDK_VERSION: r28c
 
-  # 【自用改动】Android 签名直接内嵌在 Workflow 中，免去配置 GitHub Secrets。
+  # 【自用设置】Android 签名直接内嵌，避免额外维护 GitHub Secrets。
   ANDROID_KEY_ALIAS: 'flclash'
   ANDROID_STORE_PASSWORD: 'flclash123456'
   ANDROID_KEY_PASSWORD: 'flclash123456'
@@ -45,344 +50,43 @@ env:
     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
 
 jobs:
-  dart:
-    name: Dart
-    # A private copy pays for its Actions minutes, so it runs the checks only when
-    # started by hand.
-    if: &checks github.event_name == 'workflow_dispatch' || !github.event.repository.private
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: true
-
-      - name: Test commit message hook
-        run: bash tool/check_commit_msg_test.sh
-
-      - name: Test comment density hook
-        run: bash tool/check_comment_density_test.sh
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: plugins/rust_api/rust
-          cache-directories: .dart_tool/hooks_runner
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Check format
-        run: dart format --output=none --set-exit-if-changed lib test tool plugins setup.dart
-
-      - name: Analyze
-        run: flutter analyze --no-fatal-infos
-
-      - name: Skip the Go core build hook
-        run: |
-          yq -i '.hooks.user_defines.setup.build_assets = false' pubspec.yaml
-
-      - name: Verify changelog
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
-        run: dart run tool/changelog.dart verify
-
-      - name: Run tests
-        run: flutter test --reporter expanded --coverage
-
-      - name: Check coverage
-        run: dart run tool/check_coverage.dart coverage/lcov.info 75
-
-  plugins:
-    name: Plugins
-    if: *checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - name: Validate local Flutter packages
-        run: bash tool/check_plugins.sh
-
-      - name: Validate setup hooks package
-        working-directory: plugins/setup/setup_hooks
-        run: |
-          dart pub get
-          dart analyze
-          dart test
-
-  desktop:
-    name: Desktop ${{ matrix.platform }}
-    if: *checks
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux
-            os: ubuntu-latest
-          - platform: windows
-            os: windows-2022
-          - platform: macos
-            os: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: core/go.sum
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: desktop-${{ matrix.platform }}
-          workspaces: |
-            services/helper
-            plugins/rust_api/rust
-          cache-directories: .dart_tool/hooks_runner
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - name: Install Linux build dependencies
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build libgtk-3-dev libayatana-appindicator3-dev libsecret-1-dev
-
-      - name: Setup Xcode
-        if: matrix.platform == 'macos'
-        run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app || sudo xcode-select -s /Applications/Xcode_26.2.app
-          xcodebuild -version
-
-      - name: Enable git long paths (Windows)
-        if: matrix.platform == 'windows'
-        run: git config --global core.longpaths true
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      # Compiles the desktop runners and the native plugin code that only the
-      # tagged release matrix built before; the bundle itself is discarded.
-      - name: Build debug bundle
-        run: flutter build ${{ matrix.platform }} --debug
-
-  go:
-    name: Go core
-    if: *checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: core/go.sum
-
-      - name: Validate Go core wrapper
-        working-directory: core
-        env:
-          CGO_ENABLED: 0
-        run: |
-          if ! compgen -G '*_test.go' > /dev/null; then
-            echo 'No Go tests found in core/; the test step would pass vacuously.' >&2
-            exit 1
-          fi
-          test -z "$(gofmt -l ./*.go ./platform ./tun)" || {
-            gofmt -l ./*.go ./platform ./tun >&2
-            exit 1
-          }
-          go test -count=1 .
-          go vet .
-          GOOS=linux go vet ./platform
-
-      - name: Setup NDK
-        uses: nttld/setup-ndk@v1
-        id: ndk
-        with:
-          ndk-version: ${{ env.NDK_VERSION }}
-
-      - name: Validate the Android core library
-        working-directory: core
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        run: |
-          # Nothing else compiles the `android && cgo` files before a `v*` tag.
-          CC="$(echo "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android21-clang)"
-          test -x "$CC" || { echo "NDK clang not found at $CC" >&2; exit 1; }
-          tags="$(sed -n 's/^tags: *//p' ../build_config.yaml)"
-          test -n "$tags" || { echo 'Could not read tags from build_config.yaml' >&2; exit 1; }
-          export CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC
-          go vet "-tags=$tags" . ./tun ./platform
-
-  android:
-    name: Android unit tests
-    if: *checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Setup NDK
-        uses: nttld/setup-ndk@v1
-        id: ndk
-        with:
-          ndk-version: ${{ env.NDK_VERSION }}
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Run Android unit tests
-        working-directory: android
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        run: |
-          {
-            echo "flutter.sdk=$FLUTTER_ROOT"
-            echo "sdk.dir=$ANDROID_HOME"
-          } > local.properties
-          wrapper="$FLUTTER_ROOT/bin/cache/artifacts/gradle_wrapper"
-          test -d "$wrapper" || flutter precache
-          cp -R "$wrapper/." .
-          chmod +x gradlew
-          # `:core` only calls System.loadLibrary; the excluded Flutter tasks would run
-          # the native build hooks for every debug ABI, which no JVM unit test consumes.
-          ./gradlew :common:testDebugUnitTest :service:testDebugUnitTest :app:testDebugUnitTest \
-            -x :app:compileFlutterBuildDebug -x :app:copyFlutterAssetsDebug
-
-  rust:
-    name: Rust
-    if: *checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            services/helper
-            plugins/rust_api/rust
-
-      - name: Check format
-        run: |
-          cargo fmt --manifest-path services/helper/Cargo.toml -- --check
-          cargo fmt --manifest-path plugins/rust_api/rust/Cargo.toml -- --check
-
-      - name: Run tests
-        run: |
-          cargo test --manifest-path services/helper/Cargo.toml
-          cargo test --manifest-path plugins/rust_api/rust/Cargo.toml
-
-  windows-helper-test:
-    name: Windows helper test
-    if: *checks
-    runs-on: windows-2022
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: services/helper
-
-      - name: Check format
-        run: cargo fmt --manifest-path services/helper/Cargo.toml -- --check
-
-      - name: Run Windows service tests
-        run: cargo test --manifest-path services/helper/Cargo.toml --features windows-service
-
   build:
-    # 【自用改动】只允许手动 Run workflow 时进入正式构建。
-    # 目标：同步上游代码时不自动打包，减少无意义的 Actions 消耗。
-    if: github.event_name == 'workflow_dispatch'
-    needs: [ dart, plugins, go, android, rust, windows-helper-test ]
+    name: Build ${{ matrix.platform }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+
     strategy:
-      # 【自用改动】一个平台失败时，不取消另一个平台的构建。
+      # Android 构建失败时仍让 macOS 继续，反之亦然。
       fail-fast: false
-      # 【自用改动】只生成实际需要的两个 ARM64 安装包：
-      # - Android arm64-v8a（现代 64 位 ARM 安卓设备）
-      # - macOS arm64（Apple Silicon）
       matrix:
         include:
+          # Android 仅构建现代 64 位 ARM 设备使用的 arm64-v8a。
           - platform: android
             os: ubuntu-latest
             arch: arm64
+
+          # macOS 仅构建 Apple Silicon。
           - platform: macos
             os: macos-latest
             arch: arm64
 
     steps:
-      - name: Setup rust
-        if: startsWith(matrix.os, 'windows-11-arm')
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://win.rustup.rs/aarch64" -OutFile rustup-init.exe
-          .\rustup-init.exe -y --default-toolchain stable
-          $cargoPath = "$env:USERPROFILE\.cargo\bin"
-          Add-Content $env:GITHUB_PATH $cargoPath
-
+      # ----------------------------------------------------------
+      # 1. 拉取源码与 submodule
+      # ----------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # ========================================================
-      # 【核心自用改动】只修改 Flutter / Dart 层的默认行为。
+      # ----------------------------------------------------------
+      # 2. 编译前临时应用本 Fork 的 Flutter / Dart 层定制
       #
-      # 目标：
-      # - 不修改 Go Core，降低后续同步官方代码时的冲突概率。
-      # - 编译时临时 patch，仓库业务源码本身仍可尽量跟随官方。
-      # - 如果官方以后重构了相关字段，replace_once 会让构建明确失败，
-      #   避免“以为修改生效、实际却没生效”的静默问题。
-      # ========================================================
+      # 不直接提交这些业务源码修改，目的是让 Fork 尽量贴近上游；
+      # 每次 Actions 构建时再临时 patch。
+      #
+      # replace_once 匹配不到时会主动失败，表示官方代码结构可能变化，
+      # 防止出现“构建成功，但自定义实际上没有生效”的情况。
+      # ----------------------------------------------------------
       - name: 应用 Flutter 层自用设置
         shell: bash
         run: |
@@ -390,11 +94,9 @@ jobs:
           from pathlib import Path
           import re
 
-          # 【改动目标】统一使用 ChatGPT 的 trace 页面作为延迟测试地址。
           TEST_URL = "https://chatgpt.com/cdn-cgi/trace"
 
           def replace_once(file, pattern, replacement, label):
-              """只允许匹配并替换一次；匹配不到就停止构建，提醒上游代码已变化。"""
               path = Path(file)
               source = path.read_text()
               new_source, count = re.subn(pattern, replacement, source, count=1)
@@ -404,12 +106,7 @@ jobs:
                   )
               path.write_text(new_source)
 
-          # --------------------------------------------------------
-          # 1) 手动延迟测试：超时 1 秒
-          #
-          # 目标：只关注响应最快的节点；1 秒内无法完成测试就尽快结束，
-          #      避免大量不可用/慢节点拖长整轮 UI 批量测速时间。
-          # --------------------------------------------------------
+          # ① UI 手动延迟测试：1 秒未完成就超时。
           replace_once(
               "lib/common/constant.dart",
               r"const delayTestTimeoutDuration = Duration\(seconds: \d+\);",
@@ -417,13 +114,8 @@ jobs:
               "延迟测试超时改为 1 秒",
           )
 
-          # --------------------------------------------------------
-          # 2) UI 延迟测试并发：40
-          #
-          # 目标：提高批量测速速度。
-          # Go Core 当前官方并发上限为 50，本 Workflow 不修改 Core；
-          # UI 使用 40，保留 10 个槽位（20%）作为余量。
-          # --------------------------------------------------------
+          # ② UI 批量测速并发：40。
+          #    Go Core 的官方并发上限保持 50，不修改 Core。
           replace_once(
               "lib/common/constant.dart",
               r"const maxConcurrentDelayTests = \d+;",
@@ -431,12 +123,7 @@ jobs:
               "UI 延迟测试并发改为 40",
           )
 
-          # --------------------------------------------------------
-          # 3) Flutter 层全局延迟测试 URL
-          #
-          # 目标：UI 手动测速默认直接使用 ChatGPT trace；
-          #      不去修改 core/common.go 中的 Go Core fallback。
-          # --------------------------------------------------------
+          # ③ Flutter 层默认测速地址。
           replace_once(
               "lib/common/constant.dart",
               r"const defaultTestUrl = '[^']+';",
@@ -444,38 +131,23 @@ jobs:
               "Flutter 默认测试 URL",
           )
 
-          # --------------------------------------------------------
-          # 4) 关闭 FlClash 自身的自动检查更新
-          #
-          # 目标：自编译版本不提示/检查官方 App 新版本，
-          #      避免自用 Fork 被官方升级流程干扰。
-          # 注意：这里只是 App 更新检查，不是机场/订阅自动更新。
-          # --------------------------------------------------------
+          # ④ FlClash 自身自动检查 App 更新：默认关闭。
+          #    这里只关闭 App 更新检查，不影响机场/订阅更新。
           replace_once(
               "lib/models/config.dart",
               r"@Default\(true\)\s+bool autoCheckUpdate,",
               "@Default(false) bool autoCheckUpdate,",
               "自动检查 App 更新默认关闭",
           )
-
-          # Freezed 生成文件也同步修改，确保当前构建无需重新生成代码即可生效。
           replace_once(
               "lib/models/generated/config.freezed.dart",
               r"this\.autoCheckUpdate = true",
               "this.autoCheckUpdate = false",
-              "自动检查 App 更新的生成代码默认值",
+              "自动检查 App 更新生成代码默认值",
           )
 
-          # --------------------------------------------------------
-          # 5) 强制旧安装也使用新的测试 URL，并关闭 App 自动更新
-          #
-          # 目标：即使覆盖安装前本地已经保存过旧设置，
-          #      新版本加载配置时也直接使用本 Fork 的固定值，
-          #      不需要用户再次进入 UI 手工修改。
-          #
-          # 副作用（有意为之）：
-          # 即使之后在 UI 临时修改这两项，App 重启加载配置时仍会回到这里的值。
-          # --------------------------------------------------------
+          # ⑤ 覆盖安装时也忽略旧本地配置：
+          #    强制使用新的测速 URL，并保持 App 自动更新关闭。
           replace_once(
               "lib/models/generated/config.g.dart",
               r"testUrl: json\['testUrl'\] as String\? \?\? defaultTestUrl,",
@@ -489,30 +161,22 @@ jobs:
               "忽略旧配置中的自动更新开关",
           )
 
-          # --------------------------------------------------------
-          # 6) 关闭 unified-delay（统一延迟）
-          #
-          # 目标：延迟测试尽量只做一次实际请求，
-          #      避免 unified-delay 为延迟计算再发起额外请求，
-          #      更符合“1 秒超时 + 高并发 + 快速筛选节点”的使用场景。
-          # --------------------------------------------------------
+          # ⑥ unified-delay（统一延迟）：默认关闭。
+          #    目标是让延迟测试更符合“一次请求、快速筛选”的场景。
           replace_once(
               "lib/models/clash_config.dart",
               r"@Default\(true\)\s+@JsonKey\(name: 'unified-delay'\)\s+bool unifiedDelay,",
               "@Default(false) @JsonKey(name: 'unified-delay') bool unifiedDelay,",
               "统一延迟默认关闭",
           )
-
-          # 同步修改 Freezed 生成文件，确保当前构建直接生效。
           replace_once(
               "lib/models/generated/clash_config.freezed.dart",
               r"this\.unifiedDelay = true",
               "this.unifiedDelay = false",
-              "统一延迟的生成代码默认值",
+              "统一延迟生成代码默认值",
           )
 
-          # 同时忽略旧配置中已经保存的 unified-delay=true，
-          # 确保覆盖安装后也无需再手动关闭。
+          # 同样忽略旧本地配置里已经保存的 unified-delay=true。
           replace_once(
               "lib/models/generated/clash_config.g.dart",
               r"unifiedDelay: json\['unified-delay'\] as bool\? \?\? true,",
@@ -520,19 +184,21 @@ jobs:
               "忽略旧配置中的统一延迟开关",
           )
 
-          print("已应用本 Fork 的 Flutter 层自用设置：")
-          print("  手动延迟测试超时 = 1 秒")
-          print("  UI 测试并发       = 40")
-          print(f"  全局测试 URL       = {TEST_URL}")
-          print("  App 自动检查更新   = 关闭")
-          print("  unified-delay      = 关闭")
-          print("  Go Core            = 保持官方原样")
+          print("已应用自用设置：")
+          print("  UI 延迟测试超时 = 1 秒")
+          print("  UI 测速并发     = 40")
+          print(f"  测速 URL        = {TEST_URL}")
+          print("  App 自动更新    = 关闭")
+          print("  unified-delay   = 关闭")
+          print("  Go Core         = 官方原样")
           PY
 
-      # 【自用改动】Android 签名直接从本 Workflow 顶部 env 读取。
-      # 目标：无需单独维护 GitHub Secrets，方便个人 Fork 直接构建。
-      - name: Setup Android Signing
-        if: startsWith(matrix.platform,'android')
+      # ----------------------------------------------------------
+      # 3. Android 签名
+      # 仅 Android 执行；macOS 跳过。
+      # ----------------------------------------------------------
+      - name: 配置 Android 签名
+        if: matrix.platform == 'android'
         shell: bash
         run: |
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/keystore.jks
@@ -542,29 +208,39 @@ jobs:
             echo "keyPassword=$ANDROID_KEY_PASSWORD"
           } >> android/local.properties
 
+      # ----------------------------------------------------------
+      # 4. Go
+      # setup.dart 构建 FlClash Core 时需要。
+      # setup-go 自带模块缓存，可明显减少后续构建耗时。
+      # ----------------------------------------------------------
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: core/go.sum
 
+      # ----------------------------------------------------------
+      # 5. Rust 编译缓存
+      # 不是测试步骤；用于加速原生 helper / plugin 的重复构建。
+      # ----------------------------------------------------------
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.platform }}-${{ matrix.arch || 'all' }}
+          key: ${{ matrix.platform }}-${{ matrix.arch }}
           workspaces: services/helper
           cache-directories: .dart_tool/hooks_runner
 
+      # ----------------------------------------------------------
+      # 6. Android Gradle 缓存
+      # ----------------------------------------------------------
       - name: Setup Gradle
-        if: startsWith(matrix.platform,'android')
+        if: matrix.platform == 'android'
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Enable git long paths (Windows)
-        if: startsWith(matrix.os, 'windows')
-        run: git config --global core.longpaths true
-
-      # Stable publishes no Windows or Linux arm64 archive; master makes the action
-      # clone the SDK at the pinned tag and let it fetch the host's own Dart SDK.
+      # ----------------------------------------------------------
+      # 7. Flutter
+      # 跟随官方构建所使用的固定版本，并启用 SDK 缓存。
+      # ----------------------------------------------------------
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -572,14 +248,22 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
+      # ----------------------------------------------------------
+      # 8. macOS 选择官方使用的 Xcode 版本
+      # ----------------------------------------------------------
       - name: Setup Xcode
-        if: startsWith(matrix.platform,'macos')
+        if: matrix.platform == 'macos'
+        shell: bash
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app || sudo xcode-select -s /Applications/Xcode_26.2.app
+          sudo xcode-select -s /Applications/Xcode_26.3.app ||           sudo xcode-select -s /Applications/Xcode_26.2.app
           xcodebuild -version
 
+      # ----------------------------------------------------------
+      # 9. Android NDK
+      # 构建 Android arm64 的 Go/CGo Core 需要。
+      # ----------------------------------------------------------
       - name: Setup NDK
-        if: startsWith(matrix.platform,'android')
+        if: matrix.platform == 'android'
         uses: nttld/setup-ndk@v1
         id: build-ndk
         with:
@@ -587,170 +271,42 @@ jobs:
           add-to-path: true
           link-to-sdk: true
 
-      - name: Get Flutter Dependency
+      # ----------------------------------------------------------
+      # 10. Flutter / Dart 依赖
+      # ----------------------------------------------------------
+      - name: 获取 Flutter 依赖
+        shell: bash
         run: |
           flutter --version
           flutter pub get
 
-      # See .agents/flutter-upgrade.md before bumping FLUTTER_VERSION.
-      - name: Disable Impeller on Intel macOS
-        if: matrix.platform == 'macos' && matrix.arch == 'amd64'
-        run: plutil -replace FLTEnableImpeller -bool NO macos/Runner/Info.plist
-
-      # 【自用改动】Android 明确传 --arch arm64，仅生成 arm64-v8a；
-      # macOS matrix 本身仅保留 arm64，因此只生成 Apple Silicon 包。
-      - name: Setup
+      # ----------------------------------------------------------
+      # 11. 正式构建
+      #
+      # Android 明确指定 --arch arm64，因此只生成 arm64-v8a；
+      # macOS matrix 只有 arm64，因此只生成 Apple Silicon 包。
+      # 使用 --env stable，与官方正式版本的构建环境保持一致。
+      # ----------------------------------------------------------
+      - name: Build
         env:
           ANDROID_NDK_HOME: ${{ steps.build-ndk.outputs.ndk-path }}
         shell: bash
         run: |
           if [ "${{ matrix.platform }}" = "android" ]; then
-            dart setup.dart android --arch "${{ matrix.arch }}" ${{ env.IS_STABLE == 'true' && '--env stable' || '' }} -v
+            dart setup.dart android --arch arm64 --env stable -v
           else
-            dart setup.dart macos ${{ env.IS_STABLE == 'true' && '--env stable' || '' }} -v
+            dart setup.dart macos --env stable -v
           fi
 
-      - name: Upload
+      # ----------------------------------------------------------
+      # 12. 上传最终安装包
+      #
+      # 不做 Telegram / GitHub Release / Homebrew / F-Droid 发布；
+      # 构建完成后直接在当前 Actions Run 的 Artifacts 下载即可。
+      # ----------------------------------------------------------
+      - name: 上传安装包
         uses: actions/upload-artifact@v4
         with:
-          name: artifact-${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) }}
+          name: artifact-${{ matrix.platform }}-${{ matrix.arch }}
           path: ./dist
           overwrite: true
-
-  upload:
-    # 【自用改动】官方发布流程仅允许在原作者仓库执行。
-    # 本 Fork 会在这里直接跳过，因此不会尝试 Telegram、GitHub Release、
-    # Homebrew、F-Droid 等官方发布动作；自用安装包从 Artifacts 下载即可。
-    if: github.repository == 'chen08209/FlClash'
-    permissions:
-      contents: write
-    needs: [ build ]
-    runs-on: ubuntu-latest
-    services:
-      telegram-bot-api:
-        image: aiogram/telegram-bot-api:latest
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-        ports:
-          - 8081:8081
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download
-        uses: actions/download-artifact@v4
-        with:
-          path: ./dist/
-          pattern: artifact-*
-          merge-multiple: true
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Skip native build hooks
-        run: |
-          yq -i '.hooks.user_defines.setup.build_assets = false | .hooks.user_defines.rust_api.build_assets = false' pubspec.yaml
-
-      - name: Generate release notes
-        shell: bash
-        env:
-          IS_STABLE: ${{ env.IS_STABLE }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          target=()
-          if [[ "$IS_STABLE" == 'true' ]]; then
-            target=(--tag "$TAG")
-          else
-            dart run tool/changelog.dart build --unreleased
-          fi
-          dart run tool/changelog.dart render release "${target[@]}" --out release.md
-          dart run tool/changelog.dart render telegram "${target[@]}" --out telegram.md
-
-      - name: Push to telegram
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TAG: ${{ github.ref_name }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-          python release_telegram.py
-
-      - name: Patch release.md
-        run: |
-          version=$(echo "${{ github.ref_name }}" | sed 's/^v//')
-          sed "s|VERSION|$version|g" ./.github/release_template.md >> release.md
-
-      - name: Generate sha256
-        if: ${{ env.IS_STABLE == 'true' }}
-        run: |
-          cd ./dist
-          sha256sum ./* > SHA256SUMS
-
-      - name: Release
-        if: ${{ env.IS_STABLE == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ./dist/*
-          body_path: './release.md'
-
-      - name: Create Homebrew Cask Source Dir
-        if: ${{ env.IS_STABLE == 'true' }}
-        run: |
-          version=$(echo "${{ github.ref_name }}" | sed 's/^v//')
-          arm_sha=$(sha256sum "./dist/FlClash-${version}-macos-arm64.dmg" | awk '{print $1}')
-          amd_sha=$(sha256sum "./dist/FlClash-${version}-macos-amd64.dmg" | awk '{print $1}')
-
-          mkdir -p ./brew/Casks
-          sed \
-            -e "s|VERSION|$version|g" \
-            -e "s|ARM_SHA256|$arm_sha|g" \
-            -e "s|AMD_SHA256|$amd_sha|g" \
-            ./.github/homebrew_cask_template.rb > ./brew/Casks/flclash.rb
-
-      - name: Push to Homebrew tap
-        if: ${{ env.IS_STABLE == 'true' }}
-        uses: cpina/github-action-push-to-another-repository@v1.7.2
-        env:
-          SSH_DEPLOY_KEY: ${{ secrets.HOMEBREW_SSH_DEPLOY_KEY }}
-        with:
-          source-directory: ./brew/
-          destination-github-username: chen08209
-          destination-repository-name: homebrew-tap
-          user-name: 'chen08029'
-          user-email: 'chen08209@gmail.com'
-          target-branch: main
-          commit-message: Update Homebrew cask from ${{ github.ref_name }}
-          target-directory: /
-
-      - name: Create Fdroid Source Dir
-        if: ${{ env.IS_STABLE == 'true' }}
-        run: |
-          mkdir -p ./tmp
-          cp ./dist/*android-arm64-v8a* ./tmp/ || true
-          echo "Files copied successfully"
-
-      - name: Push to fdroid repo
-        if: ${{ env.IS_STABLE == 'true' }}
-        uses: cpina/github-action-push-to-another-repository@v1.7.2
-        env:
-          SSH_DEPLOY_KEY: ${{ secrets.SSH_DEPLOY_KEY }}
-        with:
-          source-directory: ./tmp/
-          destination-github-username: chen08209
-          destination-repository-name: FlClash-fdroid-repo
-          user-name: 'chen08029'
-          user-email: 'chen08209@gmail.com'
-          target-branch: main
-          commit-message: Update from ${{ github.ref_name }}
-          target-directory: /tmp/
