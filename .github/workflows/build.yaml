@@ -2,29 +2,47 @@
 # FlClash 自用极简构建 Workflow
 #
 # 设计目标：
-# 1. 只保留“真正生成安装包”需要的步骤，不跑官方完整 CI 测试矩阵。
-# 2. 仅手动触发；同步上游代码后，由自己点击 Run workflow 构建。
+# 1. 只保留真正生成安装包所需的构建步骤，不跑官方完整 CI 测试矩阵。
+# 2. 仅手动触发；同步官方代码后，由自己点击 Run workflow 构建。
 # 3. 只构建：
 #    - macOS ARM64（Apple Silicon）
 #    - Android arm64-v8a
-# 4. 尽量只修改 Flutter / Dart 上层，不改 Go Core。
+# 4. 自用功能尽量只修改 Flutter / Dart 上层，不改 Go Core。
 #
-# 自用功能改动：
-# - UI 手动延迟测试超时：1 秒
-# - UI 批量延迟测试并发：40
-#   （Go Core 官方上限 50 不动，预留 10 个槽位 / 20% 余量）
+# 本 Fork 的自用功能：
+#
+# 【延迟测试设置改成 UI 可配置】
+# - 在「基础配置 → 常规 → 其他」中，在“测速链接”下面增加：
+#   1) 测速超时
+#      - 单位：毫秒
+#      - 默认：500 ms
+#      - 只要求输入整数且 > 0，不设置最大值
+#   2) 测速并发
+#      - 默认：40
+#      - 允许：1～50
+#      - Go Core 官方并发上限 50 保持不动
+# - 两项都会保存到 AppSettingProps。
+# - 修改后，下一次手动“延迟测试”直接使用新值；
+#   不需要重启 Core，也不需要重新编译 App。
+#
+# 【其他固定自用默认】
 # - 全局测速链接：https://chatgpt.com/cdn-cgi/trace
-# - 关闭 FlClash 自身“自动检查更新”
-#   （不影响机场/订阅更新）
+# - 关闭 FlClash 自身“自动检查更新”（不影响机场/订阅更新）
 # - 关闭 unified-delay（统一延迟）
-# - 对已经存在的旧本地设置也强制应用以上三个配置，
-#   覆盖安装后无需再次手动修改
+# - 覆盖安装时，旧本地配置中的测速 URL / App 自动更新 /
+#   unified-delay 也会被上述值覆盖，省去再次手动修改。
+#
+# 【维护原则】
+# - 不修改 core/*.go。
+# - 不直接提交业务源码改动；每次 Actions 构建时临时 patch。
+# - 修改 Freezed / JSON 模型后运行 build_runner，
+#   不手工维护 generated 模型文件。
+# - 如果官方以后重构相关代码，patch 找不到目标时主动失败。
 #
 # 为了加速，本 Workflow 刻意移除了官方 CI 中的：
 # Dart / Plugin / Desktop Debug / Go / Android Unit / Rust /
-# Windows Helper 等前置检查。
-# 这些是上游开发质量检查，不是生成自用安装包的必要步骤。
-# 真正编译失败时，下面的正式 Build 仍然会直接报错。
+# Windows Helper 等前置测试。
+# 正式 Build 自身仍会在无法编译时直接失败。
 # ============================================================
 
 name: build
@@ -59,12 +77,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Android 仅构建现代 64 位 ARM 设备使用的 arm64-v8a。
+          # Android：现代 64 位 ARM 设备，最终为 arm64-v8a。
           - platform: android
             os: ubuntu-latest
             arch: arm64
 
-          # macOS 仅构建 Apple Silicon。
+          # macOS：Apple Silicon。
           - platform: macos
             os: macos-latest
             arch: arm64
@@ -79,123 +97,438 @@ jobs:
           submodules: recursive
 
       # ----------------------------------------------------------
-      # 2. 编译前临时应用本 Fork 的 Flutter / Dart 层定制
+      # 2. 修改人工维护的 Flutter / Dart 源码
       #
-      # 不直接提交这些业务源码修改，目的是让 Fork 尽量贴近上游；
-      # 每次 Actions 构建时再临时 patch。
-      #
-      # replace_once 匹配不到时会主动失败，表示官方代码结构可能变化，
-      # 防止出现“构建成功，但自定义实际上没有生效”的情况。
+      # 这里不直接修改 lib/models/generated/*。
+      # 新增模型字段后，后面统一交给 build_runner 生成。
       # ----------------------------------------------------------
-      - name: 应用 Flutter 层自用设置
+      - name: 应用 Flutter 层自用源码修改
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          TEST_URL = "https://chatgpt.com/cdn-cgi/trace"
+          TEST_URL = 'https://chatgpt.com/cdn-cgi/trace'
+          DEFAULT_TIMEOUT_MS = 500
+          DEFAULT_CONCURRENCY = 40
+          MAX_CONCURRENCY = 50
 
-          def replace_once(file, pattern, replacement, label):
-              path = Path(file)
-              source = path.read_text()
-              new_source, count = re.subn(pattern, replacement, source, count=1)
+          def read(path):
+              return Path(path).read_text()
+
+          def write(path, value):
+              Path(path).write_text(value)
+
+          def replace_once(path, pattern, replacement, label, flags=0):
+              source = read(path)
+              target, count = re.subn(
+                  pattern,
+                  replacement,
+                  source,
+                  count=1,
+                  flags=flags,
+              )
               if count != 1:
                   raise SystemExit(
-                      f"上游代码可能已经变化：无法在 {file} 中修改【{label}】"
+                      f'上游代码可能已经变化：无法在 {path} 中修改【{label}】'
                   )
-              path.write_text(new_source)
+              write(path, target)
 
-          # ① UI 手动延迟测试：1 秒未完成就超时。
+          # ------------------------------------------------------
+          # A. Flutter 层默认测速 URL。
+          # Go Core 的 fallback 保持官方原样。
+          # ------------------------------------------------------
           replace_once(
-              "lib/common/constant.dart",
-              r"const delayTestTimeoutDuration = Duration\(seconds: \d+\);",
-              "const delayTestTimeoutDuration = Duration(seconds: 1);",
-              "延迟测试超时改为 1 秒",
-          )
-
-          # ② UI 批量测速并发：40。
-          #    Go Core 的官方并发上限保持 50，不修改 Core。
-          replace_once(
-              "lib/common/constant.dart",
-              r"const maxConcurrentDelayTests = \d+;",
-              "const maxConcurrentDelayTests = 40;",
-              "UI 延迟测试并发改为 40",
-          )
-
-          # ③ Flutter 层默认测速地址。
-          replace_once(
-              "lib/common/constant.dart",
+              'lib/common/constant.dart',
               r"const defaultTestUrl = '[^']+';",
               f"const defaultTestUrl = '{TEST_URL}';",
-              "Flutter 默认测试 URL",
+              'Flutter 默认测速 URL',
           )
 
-          # ④ FlClash 自身自动检查 App 更新：默认关闭。
-          #    这里只关闭 App 更新检查，不影响机场/订阅更新。
-          replace_once(
-              "lib/models/config.dart",
-              r"@Default\(true\)\s+bool autoCheckUpdate,",
-              "@Default(false) bool autoCheckUpdate,",
-              "自动检查 App 更新默认关闭",
+          # ------------------------------------------------------
+          # B. AppSettingProps 新增两个持久化设置。
+          #
+          # delayTestTimeoutMs:
+          #   默认 500 ms，UI 只校验整数且 > 0。
+          #
+          # delayTestConcurrency:
+          #   默认 40，UI 限制 1～50。
+          # ------------------------------------------------------
+          config_path = 'lib/models/config.dart'
+          config_source = read(config_path)
+
+          if 'delayTestTimeoutMs' in config_source or 'delayTestConcurrency' in config_source:
+              raise SystemExit(
+                  '上游 AppSettingProps 已经存在测速设置字段，请人工确认后再调整 patch'
+              )
+
+          model_pattern = re.compile(
+              r"(?m)^(?P<indent>[ \t]*)"
+              r"@Default\(defaultTestUrl\)[ \t]+String testUrl,[ \t]*$"
           )
+          match = model_pattern.search(config_source)
+          if match is None:
+              raise SystemExit(
+                  '上游代码可能已经变化：找不到 AppSettingProps.testUrl 定义'
+              )
+
+          indent = match.group('indent')
+          model_fields = (
+              match.group(0)
+              + f'\n{indent}@Default({DEFAULT_TIMEOUT_MS}) int delayTestTimeoutMs,'
+              + f'\n{indent}@Default({DEFAULT_CONCURRENCY}) int delayTestConcurrency,'
+          )
+          config_source = (
+              config_source[:match.start()]
+              + model_fields
+              + config_source[match.end():]
+          )
+          write(config_path, config_source)
+
+          # ------------------------------------------------------
+          # C. FlClash 自身自动检查 App 更新默认关闭。
+          # ------------------------------------------------------
           replace_once(
-              "lib/models/generated/config.freezed.dart",
-              r"this\.autoCheckUpdate = true",
-              "this.autoCheckUpdate = false",
-              "自动检查 App 更新生成代码默认值",
+              'lib/models/config.dart',
+              r'@Default\(true\)\s+bool autoCheckUpdate,',
+              '@Default(false) bool autoCheckUpdate,',
+              '自动检查 App 更新默认关闭',
           )
 
-          # ⑤ 覆盖安装时也忽略旧本地配置：
-          #    强制使用新的测速 URL，并保持 App 自动更新关闭。
+          # ------------------------------------------------------
+          # D. unified-delay 默认关闭。
+          # ------------------------------------------------------
           replace_once(
-              "lib/models/generated/config.g.dart",
-              r"testUrl: json\['testUrl'\] as String\? \?\? defaultTestUrl,",
-              "testUrl: defaultTestUrl,",
-              "忽略旧配置中的测试 URL",
-          )
-          replace_once(
-              "lib/models/generated/config.g.dart",
-              r"autoCheckUpdate: json\['autoCheckUpdate'\] as bool\? \?\? true,",
-              "autoCheckUpdate: false,",
-              "忽略旧配置中的自动更新开关",
-          )
-
-          # ⑥ unified-delay（统一延迟）：默认关闭。
-          #    目标是让延迟测试更符合“一次请求、快速筛选”的场景。
-          replace_once(
-              "lib/models/clash_config.dart",
-              r"@Default\(true\)\s+@JsonKey\(name: 'unified-delay'\)\s+bool unifiedDelay,",
+              'lib/models/clash_config.dart',
+              r"@Default\(true\)\s+@JsonKey\(name: 'unified-delay'\)"
+              r"\s+bool unifiedDelay,",
               "@Default(false) @JsonKey(name: 'unified-delay') bool unifiedDelay,",
-              "统一延迟默认关闭",
-          )
-          replace_once(
-              "lib/models/generated/clash_config.freezed.dart",
-              r"this\.unifiedDelay = true",
-              "this.unifiedDelay = false",
-              "统一延迟生成代码默认值",
+              '统一延迟默认关闭',
           )
 
-          # 同样忽略旧本地配置里已经保存的 unified-delay=true。
-          replace_once(
-              "lib/models/generated/clash_config.g.dart",
-              r"unifiedDelay: json\['unified-delay'\] as bool\? \?\? true,",
-              "unifiedDelay: false,",
-              "忽略旧配置中的统一延迟开关",
+          # ------------------------------------------------------
+          # E. 在“测速链接”下面增加两个 UI 输入框。
+          # ------------------------------------------------------
+          general_path = 'lib/views/config/general.dart'
+          general_source = read(general_path)
+
+          if 'class DelayTestTimeoutItem' in general_source:
+              raise SystemExit('上游 UI 已经存在 DelayTestTimeoutItem，请人工确认')
+
+          widgets = r'''
+          class DelayTestTimeoutItem extends ConsumerWidget {
+            const DelayTestTimeoutItem({super.key});
+          
+            @override
+            Widget build(BuildContext context, ref) {
+              final timeoutMs = ref.watch(
+                appSettingProvider.select((state) => state.delayTestTimeoutMs),
+              );
+          
+              return ListItem.input(
+                leading: const Icon(Icons.timer_outlined),
+                title: const Text('测速超时'),
+                subtitle: Text('$timeoutMs ms'),
+                dialogTitle: '测速超时',
+                suffixText: 'ms',
+                resetValue: '500',
+                value: '$timeoutMs',
+                validator: (String? value) {
+                  if (value == null || value.isEmpty) {
+                    return '请输入测速超时';
+                  }
+                  final intValue = int.tryParse(value);
+                  if (intValue == null || intValue <= 0) {
+                    return '请输入大于 0 的整数';
+                  }
+                  return null;
+                },
+                onChanged: (String? value) {
+                  if (value == null) {
+                    return;
+                  }
+                  final intValue = int.parse(value);
+                  ref
+                      .read(appSettingProvider.notifier)
+                      .update(
+                        (state) => state.copyWith(delayTestTimeoutMs: intValue),
+                      );
+                },
+              );
+            }
+          }
+          
+          class DelayTestConcurrencyItem extends ConsumerWidget {
+            const DelayTestConcurrencyItem({super.key});
+          
+            @override
+            Widget build(BuildContext context, ref) {
+              final concurrency = ref.watch(
+                appSettingProvider.select((state) => state.delayTestConcurrency),
+              );
+          
+              return ListItem.input(
+                leading: const Icon(Icons.tune),
+                title: const Text('测速并发'),
+                subtitle: Text('$concurrency'),
+                dialogTitle: '测速并发',
+                resetValue: '40',
+                value: '$concurrency',
+                maxLength: 2,
+                validator: (String? value) {
+                  if (value == null || value.isEmpty) {
+                    return '请输入测速并发';
+                  }
+                  final intValue = int.tryParse(value);
+                  if (intValue == null || intValue < 1 || intValue > 50) {
+                    return '请输入 1～50 的整数';
+                  }
+                  return null;
+                },
+                onChanged: (String? value) {
+                  if (value == null) {
+                    return;
+                  }
+                  final intValue = int.parse(value);
+                  ref
+                      .read(appSettingProvider.notifier)
+                      .update(
+                        (state) => state.copyWith(delayTestConcurrency: intValue),
+                      );
+                },
+              );
+            }
+          }
+          
+          '''
+
+          marker = 'class PortItem extends ConsumerWidget {'
+          if general_source.count(marker) != 1:
+              raise SystemExit(
+                  '上游代码可能已经变化：无法确定测速设置 UI 的插入位置'
+              )
+          general_source = general_source.replace(
+              marker,
+              widgets + marker,
+              1,
           )
 
-          print("已应用自用设置：")
-          print("  UI 延迟测试超时 = 1 秒")
-          print("  UI 测速并发     = 40")
-          print(f"  测速 URL        = {TEST_URL}")
-          print("  App 自动更新    = 关闭")
-          print("  unified-delay   = 关闭")
-          print("  Go Core         = 官方原样")
+          test_url_item = 'const TestUrlItem(),'
+          if general_source.count(test_url_item) != 1:
+              raise SystemExit(
+                  '上游代码可能已经变化：无法在“测速链接”下面插入设置项'
+              )
+          general_source = general_source.replace(
+              test_url_item,
+              test_url_item
+              + '\n          const DelayTestTimeoutItem(),'
+              + '\n          const DelayTestConcurrencyItem(),',
+              1,
+          )
+          write(general_path, general_source)
+
+          # ------------------------------------------------------
+          # F. asyncTestDelay 支持从 Flutter 调用者接收 timeoutMs。
+          # 我们的批量测速会显式传 UI 设置；其他未显式传值的调用点
+          # 默认使用 500ms，提高对上游代码变化的兼容性。
+          # 仍然只是 Dart → Core 的参数传递，不修改 Go Core。
+          # ------------------------------------------------------
+          interface_path = 'lib/core/interface.dart'
+
+          replace_once(
+              interface_path,
+              r'Future<Delay\?> asyncTestDelay\(String url, String proxyName\);',
+              (
+                  'Future<Delay?> asyncTestDelay(\n'
+                  '    String url,\n'
+                  '    String proxyName, {\n'
+                  '    int timeoutMs = 500,\n'
+                  '  });'
+              ),
+              'asyncTestDelay 接口增加 timeoutMs',
+          )
+
+          replace_once(
+              interface_path,
+              (
+                  r'Future<Delay\?> asyncTestDelay'
+                  r'\(String url, String proxyName\) async \{'
+              ),
+              (
+                  'Future<Delay?> asyncTestDelay(\n'
+                  '    String url,\n'
+                  '    String proxyName, {\n'
+                  '    int timeoutMs = 500,\n'
+                  '  }) async {'
+              ),
+              'asyncTestDelay 实现增加 timeoutMs',
+          )
+
+          replace_once(
+              interface_path,
+              r"'timeout':\s*delayTestTimeoutDuration\.inMilliseconds,",
+              "'timeout': timeoutMs,",
+              'Core 调用使用 UI 配置的 timeoutMs',
+          )
+
+          # ------------------------------------------------------
+          # G. ProxiesAction 使用动态 timeout / concurrency。
+          #
+          # 不写死具体 action 文件名，而是在 providers/actions 中搜索，
+          # 这样对上游的小幅文件拆分更耐受。
+          # ------------------------------------------------------
+          actions_dir = Path('lib/providers/actions')
+          action_files = list(actions_dir.rglob('*.dart'))
+          if not action_files:
+              raise SystemExit('找不到 lib/providers/actions 下的 Dart 文件')
+
+          # G1. 动态并发。
+          # 运行时再 clamp 到 1～50，防止本地 JSON 被手工改坏后
+          # UI 侧突破 Go Core 的官方 50 上限。
+          concurrency_expr = (
+              'ref.read(appSettingProvider).delayTestConcurrency'
+              '.clamp(1, 50).toInt()'
+          )
+          concurrency_replacements = 0
+
+          for path in action_files:
+              source = path.read_text()
+              if 'maxConcurrentDelayTests' not in source:
+                  continue
+              source, count = re.subn(
+                  r'\bmaxConcurrentDelayTests\b',
+                  concurrency_expr,
+                  source,
+              )
+              if count:
+                  concurrency_replacements += count
+                  path.write_text(source)
+
+          if concurrency_replacements == 0:
+              raise SystemExit(
+                  '上游代码可能已经变化：在 providers/actions 中'
+                  '找不到 maxConcurrentDelayTests'
+              )
+
+          # G2. 动态超时。
+          # 给 ProxiesAction 中所有 asyncTestDelay 调用追加 timeoutMs。
+          def matching_paren(source, open_index):
+              depth = 0
+              quote = None
+              escaped = False
+
+              for index in range(open_index, len(source)):
+                  char = source[index]
+
+                  if quote is not None:
+                      if escaped:
+                          escaped = False
+                      elif char == '\\':
+                          escaped = True
+                      elif char == quote:
+                          quote = None
+                      continue
+
+                  if char in ("'", '"'):
+                      quote = char
+                      continue
+
+                  if char == '(':
+                      depth += 1
+                  elif char == ')':
+                      depth -= 1
+                      if depth == 0:
+                          return index
+
+              return None
+
+          timeout_argument = (
+              'timeoutMs: '
+              'ref.read(appSettingProvider).delayTestTimeoutMs'
+          )
+          timeout_call_count = 0
+
+          for path in action_files:
+              source = path.read_text()
+              matches = list(
+                  re.finditer(r'\.asyncTestDelay\s*\(', source)
+              )
+              if not matches:
+                  continue
+
+              # 从后往前插入，避免前面的插入改变后续 match 的位置。
+              for match in reversed(matches):
+                  open_index = source.find('(', match.start())
+                  close_index = matching_paren(source, open_index)
+                  if close_index is None:
+                      raise SystemExit(
+                          f'无法解析 {path} 中的 asyncTestDelay 调用'
+                      )
+
+                  body = source[open_index + 1:close_index]
+                  if 'timeoutMs:' in body:
+                      continue
+
+                  stripped = body.rstrip()
+                  trailing = body[len(stripped):]
+
+                  if '\n' in body:
+                      line_start = source.rfind('\n', 0, close_index) + 1
+                      close_indent = re.match(
+                          r'[ \t]*',
+                          source[line_start:close_index],
+                      ).group(0)
+                      arg_indent = close_indent + '  '
+                      separator = '' if stripped.endswith(',') else ','
+                      new_body = (
+                          stripped
+                          + separator
+                          + '\n'
+                          + arg_indent
+                          + timeout_argument
+                          + ','
+                          + trailing
+                      )
+                  else:
+                      separator = '' if stripped.endswith(',') else ','
+                      new_body = (
+                          stripped
+                          + separator
+                          + ' '
+                          + timeout_argument
+                          + trailing
+                      )
+
+                  source = (
+                      source[:open_index + 1]
+                      + new_body
+                      + source[close_index:]
+                  )
+                  timeout_call_count += 1
+
+              path.write_text(source)
+
+          if timeout_call_count == 0:
+              raise SystemExit(
+                  '上游代码可能已经变化：在 providers/actions 中'
+                  '找不到 asyncTestDelay 调用'
+              )
+
+          print('Flutter/Dart 源码 patch 完成：')
+          print(f'  测速超时默认值 = {DEFAULT_TIMEOUT_MS} ms，可在 UI 修改，要求 > 0')
+          print(
+              f'  测速并发默认值 = {DEFAULT_CONCURRENCY}，'
+              f'UI/运行时范围 1～{MAX_CONCURRENCY}'
+          )
+          print(f'  默认测速 URL   = {TEST_URL}')
+          print('  App 自动更新   = 关闭')
+          print('  unified-delay  = 关闭')
+          print('  Go Core        = 完全不修改')
           PY
 
       # ----------------------------------------------------------
       # 3. Android 签名
-      # 仅 Android 执行；macOS 跳过。
       # ----------------------------------------------------------
       - name: 配置 Android 签名
         if: matrix.platform == 'android'
@@ -209,9 +542,7 @@ jobs:
           } >> android/local.properties
 
       # ----------------------------------------------------------
-      # 4. Go
-      # setup.dart 构建 FlClash Core 时需要。
-      # setup-go 自带模块缓存，可明显减少后续构建耗时。
+      # 4. Go（只用于构建官方 Core，不修改 Core）
       # ----------------------------------------------------------
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -220,8 +551,7 @@ jobs:
           cache-dependency-path: core/go.sum
 
       # ----------------------------------------------------------
-      # 5. Rust 编译缓存
-      # 不是测试步骤；用于加速原生 helper / plugin 的重复构建。
+      # 5. Rust 构建缓存
       # ----------------------------------------------------------
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
@@ -239,7 +569,6 @@ jobs:
 
       # ----------------------------------------------------------
       # 7. Flutter
-      # 跟随官方构建所使用的固定版本，并启用 SDK 缓存。
       # ----------------------------------------------------------
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -249,18 +578,18 @@ jobs:
           cache: true
 
       # ----------------------------------------------------------
-      # 8. macOS 选择官方使用的 Xcode 版本
+      # 8. macOS Xcode
       # ----------------------------------------------------------
       - name: Setup Xcode
         if: matrix.platform == 'macos'
         shell: bash
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app ||           sudo xcode-select -s /Applications/Xcode_26.2.app
+          sudo xcode-select -s /Applications/Xcode_26.3.app || \
+            sudo xcode-select -s /Applications/Xcode_26.2.app
           xcodebuild -version
 
       # ----------------------------------------------------------
       # 9. Android NDK
-      # 构建 Android arm64 的 Go/CGo Core 需要。
       # ----------------------------------------------------------
       - name: Setup NDK
         if: matrix.platform == 'android'
@@ -281,11 +610,99 @@ jobs:
           flutter pub get
 
       # ----------------------------------------------------------
-      # 11. 正式构建
+      # 11. 生成 Freezed / JSON 模型代码
       #
-      # Android 明确指定 --arch arm64，因此只生成 arm64-v8a；
-      # macOS matrix 只有 arm64，因此只生成 Apple Silicon 包。
-      # 使用 --env stable，与官方正式版本的构建环境保持一致。
+      # 因为新增了两个 AppSettingProps 字段，需要重新生成模型。
+      # ----------------------------------------------------------
+      - name: 生成 Dart 模型代码
+        shell: bash
+        run: |
+          dart run build_runner build --delete-conflicting-outputs
+
+      # ----------------------------------------------------------
+      # 12. 覆盖安装兼容
+      #
+      # 固定三项：
+      # - 测速 URL = ChatGPT trace
+      # - App 自动检查更新 = 关闭
+      # - unified-delay = 关闭
+      #
+      # 注意：测速超时 / 测速并发不在这里强制。
+      # 它们会正常读取用户在 UI 中保存的值。
+      # ----------------------------------------------------------
+      - name: 固定覆盖安装后的三个自用默认
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, pattern, replacement, label):
+              file = Path(path)
+              source = file.read_text()
+              target, count = re.subn(
+                  pattern,
+                  replacement,
+                  source,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+              if count != 1:
+                  raise SystemExit(
+                      f'生成代码结构发生变化：无法修改【{label}】'
+                  )
+              file.write_text(target)
+
+          replace_once(
+              'lib/models/generated/config.g.dart',
+              (
+                  r"testUrl:\s*json\['testUrl'\]\s+as\s+String\?"
+                  r"\s*\?\?\s*defaultTestUrl,"
+              ),
+              'testUrl: defaultTestUrl,',
+              '覆盖旧测速 URL',
+          )
+
+          replace_once(
+              'lib/models/generated/config.g.dart',
+              (
+                  r"autoCheckUpdate:\s*json\['autoCheckUpdate'\]"
+                  r"\s+as\s+bool\?\s*\?\?\s*false,"
+              ),
+              'autoCheckUpdate: false,',
+              '覆盖旧 App 自动更新设置',
+          )
+
+          replace_once(
+              'lib/models/generated/clash_config.g.dart',
+              (
+                  r"unifiedDelay:\s*json\['unified-delay'\]"
+                  r"\s+as\s+bool\?\s*\?\?\s*false,"
+              ),
+              'unifiedDelay: false,',
+              '覆盖旧 unified-delay 设置',
+          )
+
+          print('可变设置保留：delayTestTimeoutMs / delayTestConcurrency')
+          print('固定设置覆盖：testUrl / autoCheckUpdate / unifiedDelay')
+          PY
+
+      # ----------------------------------------------------------
+      # 13. 格式化本次修改的人工 Dart 源码
+      # 也能较早发现明显语法问题。
+      # ----------------------------------------------------------
+      - name: 格式化自定义 Dart 代码
+        shell: bash
+        run: |
+          dart format \
+            lib/models/config.dart \
+            lib/models/clash_config.dart \
+            lib/views/config/general.dart \
+            lib/core/interface.dart \
+            lib/providers/actions
+
+      # ----------------------------------------------------------
+      # 14. 正式构建
       # ----------------------------------------------------------
       - name: Build
         env:
@@ -299,10 +716,7 @@ jobs:
           fi
 
       # ----------------------------------------------------------
-      # 12. 上传最终安装包
-      #
-      # 不做 Telegram / GitHub Release / Homebrew / F-Droid 发布；
-      # 构建完成后直接在当前 Actions Run 的 Artifacts 下载即可。
+      # 15. 上传安装包
       # ----------------------------------------------------------
       - name: 上传安装包
         uses: actions/upload-artifact@v4
