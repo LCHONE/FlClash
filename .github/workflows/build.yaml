@@ -58,8 +58,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  FLUTTER_VERSION: '3.47.4'
-  GO_VERSION: '1.26.4'
+  FLUTTER_VERSION: '3.47.6'
+  GO_VERSION: '1.27.1'
   NDK_VERSION: r28c
 
   # 【自用设置】Android 签名直接内嵌，避免额外维护 GitHub Secrets。
@@ -488,7 +488,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: master
+          channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
@@ -514,6 +514,16 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: true
           link-to-sdk: true
+
+      - name: Fetch CA certificates
+        shell: bash
+        env:
+          CA_BUNDLE: cacert-2026-09-25.pem
+          CA_BUNDLE_SHA256: a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505
+        run: |
+          bundle=core/Clash.Meta/component/ca/ca-certificates.crt
+          curl -fsSL --retry 3 -o "$bundle" "https://curl.se/ca/$CA_BUNDLE"
+          echo "$CA_BUNDLE_SHA256  $bundle" | shasum -a 256 -c -
 
       # ----------------------------------------------------------
       # 10. Flutter / Dart 依赖
