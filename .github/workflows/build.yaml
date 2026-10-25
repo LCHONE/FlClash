@@ -1,58 +1,11 @@
-# ============================================================
-# FlClash 自用极简构建 Workflow
-#
-# 设计目标：
-# 1. 只保留真正生成安装包所需的构建步骤，不跑官方完整 CI 测试矩阵。
-# 2. 仅手动触发；同步官方代码后，由自己点击 Run workflow 构建。
-# 3. 只构建：
-#    - macOS ARM64（Apple Silicon）
-#    - Android arm64-v8a
-# 4. 自用功能尽量只修改 Flutter / Dart 上层，不改 Go Core。
-#
-# 本 Fork 的自用功能：
-#
-# 【延迟测试设置改成 UI 可配置】
-# - 在「基础配置 → 常规 → 其他」中，在“测速链接”下面增加：
-#   1) 测速超时
-#      - 单位：毫秒
-#      - 默认：500 ms
-#      - 只要求输入整数且 > 0，不设置最大值
-#   2) 测速并发
-#      - 默认：40
-#      - 允许：1～50
-#      - Go Core 官方并发上限 50 保持不动
-# - 两项都会保存到 AppSettingProps。
-# - 修改后，下一次手动“延迟测试”直接使用新值；
-#   不需要重启 Core，也不需要重新编译 App。
-#
-# 【其他固定自用默认】
-# - 全局测速链接：https://chatgpt.com/cdn-cgi/trace
-# - 关闭 FlClash 自身“自动检查更新”（不影响机场/订阅更新）
-# - 关闭 unified-delay（统一延迟）
-# - 覆盖安装时，旧本地配置中的测速 URL / App 自动更新 /
-#   unified-delay 也会被上述值覆盖，省去再次手动修改。
-#
-# 【维护原则】
-# - 不修改 core/*.go。
-# - 不直接提交业务源码改动；每次 Actions 构建时临时 patch。
-# - 修改 Freezed / JSON 模型后运行 build_runner，
-#   不手工维护 generated 模型文件。
-# - 测速超时/并发使用 Flutter 运行时变量实现，不修改
-#   asyncTestDelay 接口，也不依赖搜索调用点。
-# - 如果官方以后重构相关代码，patch 找不到目标时主动失败。
-#
-# 为了加速，本 Workflow 刻意移除了官方 CI 中的：
-# Dart / Plugin / Desktop Debug / Go / Android Unit / Rust /
-# Windows Helper 等前置测试。
-# 正式 Build 自身仍会在无法编译时直接失败。
-# ============================================================
-
 name: build
 
 on:
   workflow_dispatch:
 
-# 如果误点多次，只保留最新一次构建，避免浪费 Actions 时间。
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -73,578 +26,501 @@ jobs:
   build:
     name: Build ${{ matrix.platform }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
-
     strategy:
-      # Android 构建失败时仍让 macOS 继续，反之亦然。
       fail-fast: false
       matrix:
         include:
-          # Android：现代 64 位 ARM 设备，最终为 arm64-v8a。
-          - platform: android
-            os: ubuntu-latest
-            arch: arm64
-
-          # macOS：Apple Silicon。
-          - platform: macos
-            os: macos-latest
-            arch: arm64
-
+        - platform: android
+          os: ubuntu-latest
+          arch: arm64
+        - platform: macos
+          os: macos-latest
+          arch: arm64
     steps:
-      # ----------------------------------------------------------
-      # 1. 拉取源码与 submodule
-      # ----------------------------------------------------------
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - name: 应用 Flutter 层自用源码修改
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
+        import json
 
-      # ----------------------------------------------------------
-      # 2. 修改人工维护的 Flutter / Dart 源码
-      #
-      # 这里不直接修改 lib/models/generated/*。
-      # 新增模型字段后，后面统一交给 build_runner 生成。
-      # ----------------------------------------------------------
-      - name: 应用 Flutter 层自用源码修改
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
 
-          TEST_URL = 'https://chatgpt.com/cdn-cgi/trace'
-          DEFAULT_TIMEOUT_MS = 500
-          DEFAULT_CONCURRENCY = 40
-          MAX_CONCURRENCY = 50
+        def replace(path, old, new):
+            file = Path(path)
+            source = file.read_text()
+            if source.count(old) != 1:
+                raise SystemExit(f'Upstream changed: expected one target in {path}: {old[:90]}')
+            file.write_text(source.replace(old, new, 1))
 
-          def read(path):
-              return Path(path).read_text()
 
-          def write(path, value):
-              Path(path).write_text(value)
+        replace('lib/common/constant.dart', 'const defaultDelayTestTimeout = 8000;',
+                'const defaultDelayTestTimeout = 500;')
+        replace('lib/common/constant.dart', 'const maxConcurrentDelayTests = 32;',
+                'const maxConcurrentDelayTests = 40;')
+        source = Path('lib/common/constant.dart').read_text()
+        import re
+        match = re.search(r"const defaultTestUrl = '[^']+';", source)
+        if match is None:
+            raise SystemExit('Upstream changed: defaultTestUrl')
+        replace('lib/common/constant.dart', match.group(),
+                "const defaultTestUrl = 'https://chatgpt.com/cdn-cgi/trace';")
 
-          def replace_once(path, pattern, replacement, label, flags=0):
-              source = read(path)
-              target, count = re.subn(
-                  pattern,
-                  replacement,
-                  source,
-                  count=1,
-                  flags=flags,
-              )
-              if count != 1:
-                  raise SystemExit(
-                      f'上游代码可能已经变化：无法在 {path} 中修改【{label}】'
-                  )
-              write(path, target)
+        replace('lib/models/config.dart', '@freezed\nabstract class AppSettingProps', '''Object? _readPersonalTimeout(Map<dynamic, dynamic> json, String key) {
+          final value = json[key] ?? json['delayTestTimeoutMs'];
+          return value is int && value > 0 ? value : defaultDelayTestTimeout;
+        }
 
-          # ==============================================================
-          # 设计说明
-          #
-          # 上一版通过修改 asyncTestDelay 接口并搜索调用点；当前上游的
-          # 调用点不在 providers/actions 中，所以这种方式过度依赖目录结构。
-          #
-          # 本版只在 Flutter 层把两个原有 const 改成运行时变量：
-          # - 原来的测速代码仍旧读取 delayTestTimeoutDuration
-          # - 原来的批量调度仍旧读取 maxConcurrentDelayTests
-          # - UI 修改时立即更新变量
-          # - App 启动/恢复配置时从持久化值同步变量
-          #
-          # 因此不改 asyncTestDelay、不搜索调用点、不改 Go Core。
-          # ==============================================================
+        Object? _readPersonalConcurrency(Map<dynamic, dynamic> json, String key) {
+          final value = json[key];
+          return value is int ? value.clamp(1, 50).toInt() : maxConcurrentDelayTests;
+        }
 
-          # A. Flutter 层测速运行时参数。
-          replace_once(
-              'lib/common/constant.dart',
-              r'const delayTestTimeoutDuration = Duration\(seconds: \d+\);',
-              (
-                  'Duration delayTestTimeoutDuration = '
-                  'const Duration(milliseconds: 500);'
-              ),
-              '测速超时改为可运行时修改，默认 500ms',
-          )
+        Object? _readPersonalAutoCheckUpdate(Map<dynamic, dynamic> json, String key) => false;
 
-          replace_once(
-              'lib/common/constant.dart',
-              r'const maxConcurrentDelayTests = \d+;',
-              'int maxConcurrentDelayTests = 40;',
-              '测速并发改为可运行时修改，默认 40',
-          )
+        @freezed
+        abstract class AppSettingProps''')
+        replace('lib/models/config.dart',
+                '@Default(defaultDelayTestTimeout) int delayTestTimeout,', '''@Default(defaultDelayTestTimeout)
+            @JsonKey(readValue: _readPersonalTimeout)
+            int delayTestTimeout,
+            @Default(maxConcurrentDelayTests)
+            @JsonKey(readValue: _readPersonalConcurrency)
+            int delayTestConcurrency,''')
+        replace('lib/models/config.dart', '@Default(true) bool autoCheckUpdate,',
+                '@Default(false) @JsonKey(readValue: _readPersonalAutoCheckUpdate) bool autoCheckUpdate,')
 
-          # Flutter 层默认测速 URL；Go Core fallback 保持官方原样。
-          replace_once(
-              'lib/common/constant.dart',
-              r"const defaultTestUrl = '[^']+';",
-              f"const defaultTestUrl = '{TEST_URL}';",
-              'Flutter 默认测速 URL',
-          )
+        replace('lib/models/clash_config.dart', '@freezed\nabstract class PatchClashConfig', '''Object? _readPersonalTestUrl(Map<dynamic, dynamic> json, String key) => defaultTestUrl;
 
-          # B. AppSettingProps 增加两个持久化字段。
-          config_path = 'lib/models/config.dart'
-          config_source = read(config_path)
+        Object? _readPersonalUnifiedDelay(Map<dynamic, dynamic> json, String key) => false;
 
-          if (
-              'delayTestTimeoutMs' in config_source
-              or 'delayTestConcurrency' in config_source
-          ):
-              raise SystemExit(
-                  '上游 AppSettingProps 已存在测速设置字段，请人工确认 patch'
-              )
+        Object? _readPersonalGeneralKeys(Map<dynamic, dynamic> json, String key) => [
+          ...?json[key] as List?,
+          GeneralOverrideKey.testUrl.path,
+          GeneralOverrideKey.unifiedDelay.path,
+        ];
 
-          model_pattern = re.compile(
-              r"(?m)^(?P<indent>[ \t]*)"
-              r"@Default\(defaultTestUrl\)[ \t]+String testUrl,[ \t]*$"
-          )
-          match = model_pattern.search(config_source)
-          if match is None:
-              raise SystemExit(
-                  '上游代码可能已经变化：找不到 AppSettingProps.testUrl'
-              )
+        @freezed
+        abstract class PatchClashConfig''')
+        replace('lib/models/clash_config.dart',
+                "@Default(true) @JsonKey(name: 'unified-delay') bool unifiedDelay,",
+                "@Default(false) @JsonKey(name: 'unified-delay', readValue: _readPersonalUnifiedDelay) bool unifiedDelay,")
+        replace('lib/models/clash_config.dart',
+                "@Default(defaultTestUrl) @JsonKey(name: 'test-url') String testUrl,",
+                "@Default(defaultTestUrl) @JsonKey(name: 'test-url', readValue: _readPersonalTestUrl) String testUrl,")
+        replace('lib/models/clash_config.dart', '''@Default({})
+            @JsonKey(
+              name: _generalOverrideKeysJsonKey,
+              fromJson: _generalOverrideKeysFromJson,
+            )''', '''@Default({GeneralOverrideKey.testUrl, GeneralOverrideKey.unifiedDelay})
+            @JsonKey(
+              name: _generalOverrideKeysJsonKey,
+              readValue: _readPersonalGeneralKeys,
+              fromJson: _generalOverrideKeysFromJson,
+            )''')
 
-          indent = match.group('indent')
-          model_fields = (
-              match.group(0)
-              + f'\n{indent}@Default({DEFAULT_TIMEOUT_MS}) '
-                'int delayTestTimeoutMs,'
-              + f'\n{indent}@Default({DEFAULT_CONCURRENCY}) '
-                'int delayTestConcurrency,'
-          )
-          config_source = (
-              config_source[:match.start()]
-              + model_fields
-              + config_source[match.end():]
-          )
-          write(config_path, config_source)
+        replace('lib/core/interface.dart', 'timeout: delayTestGuardDuration,',
+                'timeout: coreGuardFor(timeout.inMilliseconds),')
+        replace('lib/providers/actions/proxies.dart',
+                '    final pending = ref.read(pendingDelayTestsProvider.notifier);',
+                '''    _delayTestPool.concurrency = ref.read(appSettingProvider).delayTestConcurrency;
+            final pending = ref.read(pendingDelayTestsProvider.notifier);''')
 
-          # FlClash 自身自动检查 App 更新默认关闭。
-          replace_once(
-              'lib/models/config.dart',
-              r'@Default\(true\)\s+bool autoCheckUpdate,',
-              '@Default(false) bool autoCheckUpdate,',
-              '自动检查 App 更新默认关闭',
-          )
+        replace('lib/common/task_pool.dart',
+                '  TaskPool(this.concurrency) : assert(concurrency > 0);\n\n  final int concurrency;',
+                '''  TaskPool(int concurrency) : assert(concurrency > 0), _concurrency = concurrency;
 
-          # unified-delay 默认关闭。
-          replace_once(
-              'lib/models/clash_config.dart',
-              (
-                  r"@Default\(true\)\s+"
-                  r"@JsonKey\(name: 'unified-delay'\)\s+"
-                  r"bool unifiedDelay,"
-              ),
-              (
-                  "@Default(false) "
-                  "@JsonKey(name: 'unified-delay') "
-                  "bool unifiedDelay,"
-              ),
-              '统一延迟默认关闭',
-          )
+          int _concurrency;
 
-          # C. 在“测速链接”下面增加两个输入框。
-          general_path = 'lib/views/config/general.dart'
-          general_source = read(general_path)
+          int get concurrency => _concurrency;
 
-          if 'class DelayTestTimeoutItem' in general_source:
-              raise SystemExit(
-                  '上游 UI 已存在 DelayTestTimeoutItem，请人工确认 patch'
-              )
-
-          widgets = r'''
-          class DelayTestTimeoutItem extends ConsumerWidget {
-            const DelayTestTimeoutItem({super.key});
-
-            @override
-            Widget build(BuildContext context, ref) {
-              final timeoutMs = ref.watch(
-                appSettingProvider.select((state) => state.delayTestTimeoutMs),
-              );
-
-              return ListItem.input(
-                leading: const Icon(Icons.timer_outlined),
-                title: const Text('测速超时'),
-                subtitle: Text('$timeoutMs ms'),
-                dialogTitle: '测速超时',
-                suffixText: 'ms',
-                resetValue: '500',
-                value: '$timeoutMs',
-                validator: (String? value) {
-                  if (value == null || value.isEmpty) {
-                    return '请输入测速超时';
-                  }
-                  final intValue = int.tryParse(value);
-                  if (intValue == null || intValue <= 0) {
-                    return '请输入大于 0 的整数';
-                  }
-                  return null;
-                },
-                onChanged: (String? value) {
-                  if (value == null) {
-                    return;
-                  }
-                  final intValue = int.parse(value);
-
-                  // 立即影响下一轮手动测速，无需重启 Core。
-                  delayTestTimeoutDuration = Duration(milliseconds: intValue);
-
-                  ref
-                      .read(appSettingProvider.notifier)
-                      .update(
-                        (state) => state.copyWith(delayTestTimeoutMs: intValue),
-                      );
-                },
-              );
+          set concurrency(int value) {
+            if (value <= 0) {
+              throw ArgumentError.value(value, 'concurrency');
             }
+            _concurrency = value;
+            _drain();
           }
 
-          class DelayTestConcurrencyItem extends ConsumerWidget {
-            const DelayTestConcurrencyItem({super.key});
-
-            @override
-            Widget build(BuildContext context, ref) {
-              final concurrency = ref.watch(
-                appSettingProvider.select((state) => state.delayTestConcurrency),
-              );
-
-              return ListItem.input(
-                leading: const Icon(Icons.tune),
-                title: const Text('测速并发'),
-                subtitle: Text('$concurrency'),
-                dialogTitle: '测速并发',
-                resetValue: '40',
-                value: '$concurrency',
-                maxLength: 2,
-                validator: (String? value) {
-                  if (value == null || value.isEmpty) {
-                    return '请输入测速并发';
-                  }
-                  final intValue = int.tryParse(value);
-                  if (intValue == null || intValue < 1 || intValue > 50) {
-                    return '请输入 1～50 的整数';
-                  }
-                  return null;
-                },
-                onChanged: (String? value) {
-                  if (value == null) {
-                    return;
-                  }
-                  final intValue = int.parse(value);
-                  final normalized = intValue.clamp(1, 50).toInt();
-
-                  // 立即影响下一轮批量测速；Go Core 的 50 上限保持不动。
-                  maxConcurrentDelayTests = normalized;
-
-                  ref
-                      .read(appSettingProvider.notifier)
-                      .update(
-                        (state) => state.copyWith(
-                          delayTestConcurrency: normalized,
-                        ),
-                      );
-                },
-              );
+          void _drain() {
+            while (_active < concurrency && _waiting.isNotEmpty) {
+              _active++;
+              _waiting.removeFirst().complete();
             }
-          }
+          }''')
+        replace('lib/common/task_pool.dart',
+                'int get idleSlots => _waiting.isEmpty ? concurrency - _active : 0;',
+                'int get idleSlots => _waiting.isEmpty ? (concurrency - _active).clamp(0, concurrency).toInt() : 0;')
+        replace('lib/common/task_pool.dart', '''      if (_waiting.isNotEmpty) {
+                _waiting.removeFirst().complete();
+              } else {
+                _active--;
+              }''', '''      _active--;
+              _drain();''')
 
-          '''
+        replace('lib/views/config/general.dart', '''    return ConfigOptionsItem<int>(
+              title: (l) => l.delayTestTimeout,
+              options: delayTestTimeoutOptions,
+              textBuilder: (value) => '$value ms',
+              selector: appSettingProvider.select((state) => state.delayTestTimeout),
+              onChanged: (ref, value) => ref
+                  .read(appSettingProvider.notifier)
+                  .update((state) => state.copyWith(delayTestTimeout: value)),
+            );''', '''    final l = context.appLocalizations;
+            final timeout = ref.watch(appSettingProvider.select((state) => state.delayTestTimeout));
+            return ListItem.input(
+              title: Text(l.delayTestTimeout),
+              subtitle: Text('$timeout ms'),
+              dialogTitle: l.delayTestTimeout,
+              suffixText: 'ms',
+              resetValue: '500',
+              value: '$timeout',
+              keyboardType: TextInputType.number,
+              validator: (value) => int.tryParse(value ?? '') case final int number when number > 0
+                  ? null : l.personalPositiveInteger,
+              onChanged: (value) {
+                if (value == null) return;
+                ref.read(appSettingProvider.notifier).update(
+                  (state) => state.copyWith(delayTestTimeout: int.parse(value)),
+                );
+              },
+            );'''.replace("validator: (value) => int.tryParse(value ?? '') case final int number when number > 0\n          ? null : l.personalPositiveInteger,", "validator: (value) {\n        final number = int.tryParse(value ?? '');\n        return number != null && number > 0 ? null : l.personalPositiveInteger;\n      },"))
+        replace('lib/views/config/general.dart', 'class PortItem extends ConsumerWidget {', '''class DelayTestConcurrencyItem extends ConsumerWidget {
+          const DelayTestConcurrencyItem({super.key});
 
-          marker = 'class PortItem extends ConsumerWidget {'
-          if general_source.count(marker) != 1:
-              raise SystemExit(
-                  '上游代码可能已经变化：无法确定测速设置 UI 插入位置'
-              )
-          general_source = general_source.replace(
-              marker,
-              widgets + marker,
-              1,
-          )
-
-          test_url_item = 'const TestUrlItem(),'
-          if general_source.count(test_url_item) != 1:
-              raise SystemExit(
-                  '上游代码可能已经变化：无法在“测速链接”下面插入设置项'
-              )
-          general_source = general_source.replace(
-              test_url_item,
-              (
-                  test_url_item
-                  + '\n          const DelayTestTimeoutItem(),'
-                  + '\n          const DelayTestConcurrencyItem(),'
-              ),
-              1,
-          )
-          write(general_path, general_source)
-
-          # D. App 启动/恢复配置时同步运行时变量。
-          provider_path = 'lib/providers/config.dart'
-          provider_source = read(provider_path)
-
-          if '_syncDelayTestSettings' in provider_source:
-              raise SystemExit(
-                  '上游 providers/config.dart 已存在测速同步逻辑，请人工确认'
-              )
-
-          helper = r'''
-          void _syncDelayTestSettings(AppSettingProps settings) {
-            delayTestTimeoutDuration = Duration(
-              milliseconds: settings.delayTestTimeoutMs,
+          @override
+          Widget build(BuildContext context, WidgetRef ref) {
+            final l = context.appLocalizations;
+            final concurrency = ref.watch(appSettingProvider.select((state) => state.delayTestConcurrency));
+            return ListItem.input(
+              title: Text(l.personalDelayTestConcurrency),
+              subtitle: Text('$concurrency'),
+              dialogTitle: l.personalDelayTestConcurrency,
+              resetValue: '40',
+              value: '$concurrency',
+              maxLength: 2,
+              keyboardType: TextInputType.number,
+              validator: (value) {
+                final number = int.tryParse(value ?? '');
+                return number != null && number >= 1 && number <= 50
+                    ? null : l.numberRangeTip(l.personalDelayTestConcurrency, 1, 50);
+              },
+              onChanged: (value) {
+                if (value == null) return;
+                ref.read(appSettingProvider.notifier).update(
+                  (state) => state.copyWith(delayTestConcurrency: int.parse(value)),
+                );
+              },
             );
-            maxConcurrentDelayTests =
-                settings.delayTestConcurrency.clamp(1, 50).toInt();
           }
+        }
 
-          '''
+        class PortItem extends ConsumerWidget {''')
+        replace('lib/views/config/general.dart', '      const DelayTestTimeoutItem(),',
+                '      const DelayTestTimeoutItem(),\n      const DelayTestConcurrencyItem(),')
 
-          write_marker = 'void writeConfig(Ref ref, Config config) {'
-          if provider_source.count(write_marker) != 1:
-              raise SystemExit(
-                  '上游代码可能已经变化：找不到 writeConfig'
-              )
+        translations = {
+            'en': ('Delay test concurrency', 'Enter an integer greater than 0'),
+            'zh_CN': ('测速并发', '请输入大于 0 的整数'),
+            'ja': ('遅延テストの同時実行数', '0 より大きい整数を入力してください'),
+            'ru': ('Параллельные тесты задержки', 'Введите целое число больше 0'),
+            'fr': ('Tests de latence simultanés', 'Saisissez un entier supérieur à 0'),
+            'es': ('Pruebas de latencia simultáneas', 'Introduce un entero mayor que 0'),
+            'ko': ('지연 시간 테스트 동시 실행 수', '0보다 큰 정수를 입력하세요'),
+        }
+        for locale, (concurrency, positive) in translations.items():
+            file = Path(f'arb/intl_{locale}.arb')
+            data = json.loads(file.read_text())
+            data.update(personalDelayTestConcurrency=concurrency, personalPositiveInteger=positive)
+            file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
 
-          provider_source = provider_source.replace(
-              write_marker,
-              (
-                  helper
-                  + write_marker
-                  + '\n  _syncDelayTestSettings(config.appSettingProps);'
-              ),
-              1,
-          )
+        print('Personal v0.9.2 patch applied; Go sources and generated files unchanged.')
 
-          override_marker = 'List<Override> buildConfigOverrides(Config config) {'
-          if provider_source.count(override_marker) != 1:
-              raise SystemExit(
-                  '上游代码可能已经变化：找不到 buildConfigOverrides'
-              )
+        Path('test/personal_build_test.dart').write_text(r'''import 'dart:async';
+        import 'dart:convert';
 
-          provider_source = provider_source.replace(
-              override_marker,
-              (
-                  override_marker
-                  + '\n  _syncDelayTestSettings(config.appSettingProps);'
-              ),
-              1,
-          )
+        import 'package:fl_clash/common/common.dart';
+        import 'package:fl_clash/enum/enum.dart';
+        import 'package:fl_clash/models/models.dart';
+        import 'package:fl_clash/providers/config.dart';
+        import 'package:fl_clash/state.dart';
+        import 'package:fl_clash/ui/list.dart';
+        import 'package:fl_clash/views/config/general.dart';
+        import 'package:flutter_riverpod/flutter_riverpod.dart';
+        import 'package:flutter_test/flutter_test.dart';
+        import 'package:material_ui/material_ui.dart';
 
-          write(provider_path, provider_source)
+        import 'helpers/test_app.dart';
 
-          print('Flutter/Dart 源码 patch 完成：')
-          print(
-              f'  测速超时默认值 = {DEFAULT_TIMEOUT_MS} ms，'
-              'UI 可修改，只要求 > 0'
-          )
-          print(
-              f'  测速并发默认值 = {DEFAULT_CONCURRENCY}，'
-              f'UI / 运行时范围 1～{MAX_CONCURRENCY}'
-          )
-          print(f'  默认测速 URL   = {TEST_URL}')
-          print('  App 自动更新   = 关闭')
-          print('  unified-delay  = 关闭')
-          print('  Go Core        = 完全不修改')
-          print('  asyncTestDelay = 接口和调用点完全不修改')
-          PY
+        void main() {
+          test('personal defaults apply on a fresh install', () {
+            const settings = AppSettingProps();
+            const clash = PatchClashConfig();
+            expect(settings.delayTestTimeout, 500);
+            expect(settings.delayTestConcurrency, 40);
+            expect(settings.autoCheckUpdate, isFalse);
+            expect(clash.testUrl, 'https://chatgpt.com/cdn-cgi/trace');
+            expect(clash.unifiedDelay, isFalse);
+            expect(clash.generalOverrideKeys, containsAll([
+              GeneralOverrideKey.testUrl,
+              GeneralOverrideKey.unifiedDelay,
+            ]));
+            expect(clash.toUpdateParams().unifiedDelay, isFalse);
+          });
 
-      # ----------------------------------------------------------
-      # 3. Android 签名
-      # ----------------------------------------------------------
-      - name: 配置 Android 签名
-        if: matrix.platform == 'android'
-        shell: bash
-        run: |
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/keystore.jks
-          {
-            echo "keyAlias=$ANDROID_KEY_ALIAS"
-            echo "storePassword=$ANDROID_STORE_PASSWORD"
-            echo "keyPassword=$ANDROID_KEY_PASSWORD"
-          } >> android/local.properties
+          test('old custom timeout and concurrency survive an upgrade', () {
+            final settings = AppSettingProps.fromJson({
+              'delayTestTimeoutMs': 12345,
+              'delayTestConcurrency': 17,
+              'autoCheckUpdate': true,
+            });
+            expect(settings.delayTestTimeout, 12345);
+            expect(settings.delayTestConcurrency, 17);
+            expect(settings.autoCheckUpdate, isFalse);
+            final restored = AppSettingProps.fromJson(
+              jsonDecode(jsonEncode(settings.toJson())) as Map<String, Object?>,
+            );
+            expect(restored.delayTestTimeout, 12345);
+            expect(restored.delayTestConcurrency, 17);
+          });
 
-      # ----------------------------------------------------------
-      # 4. Go（只用于构建官方 Core，不修改 Core）
-      # ----------------------------------------------------------
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: core/go.sum
+          test('invalid persisted probe settings are normalized', () {
+            expect(AppSettingProps.fromJson({'delayTestTimeout': 0}).delayTestTimeout, 500);
+            expect(AppSettingProps.fromJson({'delayTestConcurrency': 99}).delayTestConcurrency, 50);
+            expect(AppSettingProps.fromJson({'delayTestConcurrency': -1}).delayTestConcurrency, 1);
+            expect(coreGuardFor(60000), const Duration(seconds: 125));
+          });
 
-      # ----------------------------------------------------------
-      # 5. Rust 构建缓存
-      # ----------------------------------------------------------
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.platform }}-${{ matrix.arch }}
-          workspaces: services/helper
-          cache-directories: .dart_tool/hooks_runner
+          test('old and new override formats retain personal fixed settings', () {
+            for (final keys in [null, <String>[], ['tcp-concurrent']]) {
+              final clash = PatchClashConfig.fromJson({
+                'test-url': 'https://example.com',
+                'unified-delay': true,
+                if (keys != null) 'general-override-keys': keys,
+              });
+              expect(clash.testUrl, defaultTestUrl);
+              expect(clash.unifiedDelay, isFalse);
+              expect(clash.generalOverrideKeys, containsAll([
+                GeneralOverrideKey.testUrl,
+                GeneralOverrideKey.unifiedDelay,
+              ]));
+              if (keys?.contains('tcp-concurrent') ?? false) {
+                expect(clash.generalOverrideKeys, contains(GeneralOverrideKey.tcpConcurrent));
+              }
+            }
+          });
 
-      # ----------------------------------------------------------
-      # 6. Android Gradle 缓存
-      # ----------------------------------------------------------
-      - name: Setup Gradle
-        if: matrix.platform == 'android'
-        uses: gradle/actions/setup-gradle@v6
+          test('a shrinking pool holds queued work until capacity is available', () async {
+            final pool = TaskPool(3);
+            final gates = List.generate(5, (_) => Completer<void>());
+            final started = <int>[];
+            final runs = List.generate(5, (index) => pool.run(() async {
+              started.add(index);
+              await gates[index].future;
+            }));
+            expect(started, [0, 1, 2]);
+            pool.concurrency = 1;
+            expect(pool.idleSlots, 0);
+            gates[0].complete();
+            gates[1].complete();
+            await Future<void>.delayed(Duration.zero);
+            expect(started, [0, 1, 2]);
+            gates[2].complete();
+            await Future<void>.delayed(Duration.zero);
+            expect(started, [0, 1, 2, 3]);
+            gates[3].complete();
+            await Future<void>.delayed(Duration.zero);
+            gates[4].complete();
+            await Future.wait(runs);
+            expect(pool.activeCount, 0);
+          });
 
-      # ----------------------------------------------------------
-      # 7. Flutter
-      # ----------------------------------------------------------
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
+          test('growing a pool immediately admits queued work', () async {
+            final pool = TaskPool(1);
+            final gate = Completer<void>();
+            final started = <int>[];
+            final runs = List.generate(3, (index) => pool.run(() async {
+              started.add(index);
+              await gate.future;
+            }));
+            expect(started, [0]);
+            pool.concurrency = 3;
+            await Future<void>.delayed(Duration.zero);
+            expect(started, [0, 1, 2]);
+            gate.complete();
+            await Future.wait(runs);
+            expect(pool.activeCount, 0);
+            expect(() => pool.concurrency = 0, throwsArgumentError);
+          });
 
-      # ----------------------------------------------------------
-      # 8. macOS Xcode
-      # ----------------------------------------------------------
-      - name: Setup Xcode
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app || \
-            sudo xcode-select -s /Applications/Xcode_26.2.app
-          xcodebuild -version
+          testWidgets('timeout accepts arbitrary positive integers', (tester) async {
+            final container = ProviderContainer();
+            globalState.container = container;
+            addTearDown(container.dispose);
+            final hold = container.listen(appSettingProvider, (_, _) {});
+            addTearDown(hold.close);
+            await tester.pumpWidget(UncontrolledProviderScope(
+              container: container,
+              child: const TestApp(child: Scaffold(body: DelayTestTimeoutItem())),
+            ));
+            await tester.pumpAndSettle();
+            final item = tester.widget<ListItem>(find.byType(ListItem));
+            expect(item.subtitle, isA<Text>().having((text) => text.data, 'text', '500 ms'));
+            await tester.tap(find.text('500 ms'));
+            await tester.pumpAndSettle();
+            final field = tester.widget<TextFormField>(find.byType(TextFormField).first);
+            expect(field.validator!('0'), isNotNull);
+            expect(field.validator!('-2'), isNotNull);
+            expect(field.validator!('1.5'), isNotNull);
+            expect(field.validator!('60000'), isNull);
+            await tester.enterText(find.byType(TextFormField).first, '60000');
+            await tester.tap(find.text(currentAppLocalizations.confirm));
+            await tester.pumpAndSettle();
+            expect(container.read(appSettingProvider).delayTestTimeout, 60000);
+          });
 
-      # ----------------------------------------------------------
-      # 9. Android NDK
-      # ----------------------------------------------------------
-      - name: Setup NDK
-        if: matrix.platform == 'android'
-        uses: nttld/setup-ndk@v1
-        id: build-ndk
-        with:
-          ndk-version: ${{ env.NDK_VERSION }}
-          add-to-path: true
-          link-to-sdk: true
+          testWidgets('concurrency rejects values outside 1 to 50', (tester) async {
+            final container = ProviderContainer();
+            globalState.container = container;
+            addTearDown(container.dispose);
+            final hold = container.listen(appSettingProvider, (_, _) {});
+            addTearDown(hold.close);
+            await tester.pumpWidget(UncontrolledProviderScope(
+              container: container,
+              child: const TestApp(child: Scaffold(body: DelayTestConcurrencyItem())),
+            ));
+            await tester.pumpAndSettle();
+            await tester.tap(find.text('40'));
+            await tester.pumpAndSettle();
+            final field = tester.widget<TextFormField>(find.byType(TextFormField).first);
+            expect(field.validator!('0'), isNotNull);
+            expect(field.validator!('51'), isNotNull);
+            expect(field.validator!('1'), isNull);
+            expect(field.validator!('50'), isNull);
+            await tester.enterText(find.byType(TextFormField).first, '17');
+            await tester.tap(find.text(currentAppLocalizations.confirm));
+            await tester.pumpAndSettle();
+            expect(container.read(appSettingProvider).delayTestConcurrency, 17);
+          });
+        }
+        ''')
 
-      - name: Fetch CA certificates
-        shell: bash
-        env:
-          CA_BUNDLE: cacert-2026-09-25.pem
-          CA_BUNDLE_SHA256: a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505
-        run: |
-          bundle=core/Clash.Meta/component/ca/ca-certificates.crt
-          curl -fsSL --retry 3 -o "$bundle" "https://curl.se/ca/$CA_BUNDLE"
-          echo "$CA_BUNDLE_SHA256  $bundle" | shasum -a 256 -c -
-
-      # ----------------------------------------------------------
-      # 10. Flutter / Dart 依赖
-      # ----------------------------------------------------------
-      - name: 获取 Flutter 依赖
-        shell: bash
-        run: |
-          flutter --version
-          flutter pub get
-
-      # ----------------------------------------------------------
-      # 11. 生成 Freezed / JSON 模型代码
-      #
-      # 因为新增了两个 AppSettingProps 字段，需要重新生成模型。
-      # ----------------------------------------------------------
-      - name: 生成 Dart 模型代码
-        shell: bash
-        run: |
-          dart run build_runner build --delete-conflicting-outputs
-
-      # ----------------------------------------------------------
-      # 12. 覆盖安装兼容
-      #
-      # 固定三项：
-      # - 测速 URL = ChatGPT trace
-      # - App 自动检查更新 = 关闭
-      # - unified-delay = 关闭
-      #
-      # 注意：测速超时 / 测速并发不在这里强制。
-      # 它们会正常读取用户在 UI 中保存的值。
-      # ----------------------------------------------------------
-      - name: 固定覆盖安装后的三个自用默认
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          def replace_once(path, pattern, replacement, label):
-              file = Path(path)
-              source = file.read_text()
-              target, count = re.subn(
-                  pattern,
-                  replacement,
-                  source,
-                  count=1,
-                  flags=re.MULTILINE,
-              )
-              if count != 1:
-                  raise SystemExit(
-                      f'生成代码结构发生变化：无法修改【{label}】'
-                  )
-              file.write_text(target)
-
-          replace_once(
-              'lib/models/generated/config.g.dart',
-              (
-                  r"testUrl:\s*json\['testUrl'\]\s+as\s+String\?"
-                  r"\s*\?\?\s*defaultTestUrl,"
-              ),
-              'testUrl: defaultTestUrl,',
-              '覆盖旧测速 URL',
-          )
-
-          replace_once(
-              'lib/models/generated/config.g.dart',
-              (
-                  r"autoCheckUpdate:\s*json\['autoCheckUpdate'\]"
-                  r"\s+as\s+bool\?\s*\?\?\s*false,"
-              ),
-              'autoCheckUpdate: false,',
-              '覆盖旧 App 自动更新设置',
-          )
-
-          replace_once(
-              'lib/models/generated/clash_config.g.dart',
-              (
-                  r"unifiedDelay:\s*json\['unified-delay'\]"
-                  r"\s+as\s+bool\?\s*\?\?\s*false,"
-              ),
-              'unifiedDelay: false,',
-              '覆盖旧 unified-delay 设置',
-          )
-
-          print('可变设置保留：delayTestTimeoutMs / delayTestConcurrency')
-          print('固定设置覆盖：testUrl / autoCheckUpdate / unifiedDelay')
-          PY
-
-      # ----------------------------------------------------------
-      # 13. 格式化本次修改的人工 Dart 源码
-      # 也能较早发现明显语法问题。
-      # ----------------------------------------------------------
-      - name: 格式化自定义 Dart 代码
-        shell: bash
-        run: |
-          dart format \
-            lib/models/config.dart \
-            lib/models/clash_config.dart \
-            lib/views/config/general.dart \
-            lib/providers/config.dart
-
-      # ----------------------------------------------------------
-      # 14. 正式构建
-      # ----------------------------------------------------------
-      - name: Build
-        env:
-          ANDROID_NDK_HOME: ${{ steps.build-ndk.outputs.ndk-path }}
-        shell: bash
-        run: |
-          if [ "${{ matrix.platform }}" = "android" ]; then
-            dart setup.dart android --arch arm64 --env stable -v
-          else
-            dart setup.dart macos --env stable -v
-          fi
-
-      # ----------------------------------------------------------
-      # 15. 上传安装包
-      # ----------------------------------------------------------
-      - name: 上传安装包
-        uses: actions/upload-artifact@v4
-        with:
-          name: artifact-${{ matrix.platform }}-${{ matrix.arch }}
-          path: ./dist
-          overwrite: true
+        PY
+    - name: 配置 Android 签名
+      if: matrix.platform == 'android'
+      shell: bash
+      run: |
+        printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/keystore.jks
+        {
+          echo "keyAlias=$ANDROID_KEY_ALIAS"
+          echo "storePassword=$ANDROID_STORE_PASSWORD"
+          echo "keyPassword=$ANDROID_KEY_PASSWORD"
+        } >> android/local.properties
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache-dependency-path: core/go.sum
+    - name: Setup Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ matrix.platform }}-${{ matrix.arch }}
+        workspaces: |-
+          services/helper
+          plugins/rust_api/rust
+        cache-directories: .dart_tool/hooks_runner
+    - name: Setup Gradle
+      if: matrix.platform == 'android'
+      uses: gradle/actions/setup-gradle@v6
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        flutter-version: ${{ env.FLUTTER_VERSION }}
+        cache: true
+    - name: Setup Xcode
+      if: matrix.platform == 'macos'
+      shell: bash
+      run: |
+        sudo xcode-select -s /Applications/Xcode_26.3.app || \
+          sudo xcode-select -s /Applications/Xcode_26.2.app
+        xcodebuild -version
+    - name: Setup NDK
+      if: matrix.platform == 'android'
+      uses: nttld/setup-ndk@v1
+      id: build-ndk
+      with:
+        ndk-version: ${{ env.NDK_VERSION }}
+        add-to-path: true
+        link-to-sdk: true
+    - name: Fetch CA certificates
+      shell: bash
+      env:
+        CA_BUNDLE: cacert-2026-09-25.pem
+        CA_BUNDLE_SHA256: a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505
+      run: |
+        bundle=core/Clash.Meta/component/ca/ca-certificates.crt
+        curl -fsSL --retry 3 -o "$bundle" "https://curl.se/ca/$CA_BUNDLE"
+        echo "$CA_BUNDLE_SHA256  $bundle" | shasum -a 256 -c -
+    - name: 获取 Flutter 依赖
+      shell: bash
+      run: |
+        flutter --version
+        flutter pub get
+    - name: 生成本地化与模型代码
+      shell: bash
+      run: |
+        cp pubspec.yaml "$RUNNER_TEMP/pubspec.codegen.yaml"
+        trap 'cp "$RUNNER_TEMP/pubspec.codegen.yaml" pubspec.yaml' EXIT
+        python3 - <<'PY'
+        from pathlib import Path
+        file = Path('pubspec.yaml')
+        file.write_text(file.read_text().replace('build_assets: true', 'build_assets: false'))
+        PY
+        dart run intl_utils:generate
+        dart run build_runner build --delete-conflicting-outputs
+    - name: 格式化自定义 Dart 代码
+      shell: bash
+      run: |
+        dart format \
+          lib/common/constant.dart lib/common/task_pool.dart lib/core/interface.dart \
+          lib/models/config.dart lib/models/clash_config.dart \
+          lib/views/config/general.dart lib/providers/actions/proxies.dart \
+          test/personal_build_test.dart
+    - name: 验证自定义设置与调度兼容性
+      shell: bash
+      run: |
+        flutter analyze --no-fatal-infos
+        cp pubspec.yaml "$RUNNER_TEMP/pubspec.test.yaml"
+        trap 'cp "$RUNNER_TEMP/pubspec.test.yaml" pubspec.yaml' EXIT
+        python3 - <<'PY'
+        from pathlib import Path
+        file = Path('pubspec.yaml')
+        source = file.read_text()
+        old = '    setup:\n      build_assets: true'
+        if source.count(old) != 1:
+            raise SystemExit('Cannot disable the Go packaging hook for tests')
+        file.write_text(source.replace(old, '    setup:\n      build_assets: false', 1))
+        PY
+        flutter test test/personal_build_test.dart test/common/task_pool_test.dart test/l10n test/lint/dynamic_message_key_test.dart
+    - name: Build
+      env:
+        ANDROID_NDK_HOME: ${{ steps.build-ndk.outputs.ndk-path }}
+      shell: bash
+      run: |
+        if [ "${{ matrix.platform }}" = "android" ]; then
+          dart setup.dart android --arch arm64 --env stable -v
+        else
+          dart setup.dart macos --env stable -v
+        fi
+    - name: 上传安装包
+      uses: actions/upload-artifact@v4
+      with:
+        name: artifact-${{ matrix.platform }}-${{ matrix.arch }}
+        path: ./dist
+        overwrite: true
+        if-no-files-found: error
+        retention-days: 30
