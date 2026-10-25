@@ -20,7 +20,7 @@ env:
   GO_VERSION: '1.27.1'
   NDK_VERSION: r28c
 
-  # 【自用设置】Android 签名直接内嵌，避免额外维护 GitHub Secrets。
+  # Android 签名直接内嵌，避免额外维护 GitHub Secrets。
   ANDROID_KEY_ALIAS: 'flclash'
   ANDROID_STORE_PASSWORD: 'flclash123456'
   ANDROID_KEY_PASSWORD: 'flclash123456'
@@ -47,7 +47,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: recursive
-    - name: 应用 Flutter 层自用源码修改
+    - name: 应用 Flutter 层配置修改
       shell: bash
       run: |
         python3 - <<'PY'
@@ -604,9 +604,9 @@ jobs:
         test -s "dist/$android"
         (cd dist && sha256sum "$macos" "$android" > SHA256SUMS.txt)
         cat > "$RUNNER_TEMP/release-notes.md" <<EOF
-        基于上游 v${version} 的自用构建，提供 macOS Apple Silicon 和 Android ARM64 安装包，任何人均可直接下载。
+        基于上游 v${version} 构建，提供 macOS Apple Silicon（ARM64）和 Android ARM64 安装包。
 
-        保留自用设置：测速超时默认 500 ms（可修改）、测速并发默认 40（1–50）、默认测速链接为 ChatGPT trace、关闭 App 自动检查更新及 unified-delay。
+        构建配置：测速超时默认 500 ms（可修改）、测速并发默认 40（1–50）、默认测速链接为 https://chatgpt.com/cdn-cgi/trace、关闭 App 自动检查更新及 unified-delay。
 
         - 源码提交：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$SOURCE_SHA
         - 构建记录：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID
@@ -614,8 +614,9 @@ jobs:
         EOF
         if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" \
-            --title "FlClash v${version} 自用版" --notes-file "$RUNNER_TEMP/release-notes.md" --draft
+            --title "FlClash v${version}" --notes-file "$RUNNER_TEMP/release-notes.md" --draft
         fi
         gh release upload "$tag" "dist/$macos" "dist/$android" dist/SHA256SUMS.txt \
           --repo "$GITHUB_REPOSITORY" --clobber
-        gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest \
+          --title "FlClash v${version}" --notes-file "$RUNNER_TEMP/release-notes.md"
