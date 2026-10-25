@@ -377,7 +377,7 @@ jobs:
             expect(field.validator!('1.5'), isNotNull);
             expect(field.validator!('60000'), isNull);
             await tester.enterText(find.byType(TextFormField).first, '60000');
-            await tester.tap(find.text(currentAppLocalizations.confirm));
+            tester.widget<TextFormField>(find.byType(TextFormField).first).onFieldSubmitted!('');
             await tester.pumpAndSettle();
             expect(container.read(appSettingProvider).delayTestTimeout, 60000);
           });
@@ -401,7 +401,7 @@ jobs:
             expect(field.validator!('1'), isNull);
             expect(field.validator!('50'), isNull);
             await tester.enterText(find.byType(TextFormField).first, '17');
-            await tester.tap(find.text(currentAppLocalizations.confirm));
+            tester.widget<TextFormField>(find.byType(TextFormField).first).onFieldSubmitted!('');
             await tester.pumpAndSettle();
             expect(container.read(appSettingProvider).delayTestConcurrency, 17);
           });
@@ -505,7 +505,7 @@ jobs:
             raise SystemExit('Cannot disable the Go packaging hook for tests')
         file.write_text(source.replace(old, '    setup:\n      build_assets: false', 1))
         PY
-        flutter test test/personal_build_test.dart test/common/task_pool_test.dart test/l10n test/lint/dynamic_message_key_test.dart
+        flutter test test/personal_build_test.dart test/common/task_pool_test.dart test/providers/proxies_action_test.dart test/core/protocol_contract_test.dart test/l10n test/lint/dynamic_message_key_test.dart
     - name: Build
       env:
         ANDROID_NDK_HOME: ${{ steps.build-ndk.outputs.ndk-path }}
