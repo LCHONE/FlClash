@@ -2,6 +2,11 @@ name: build
 
 on:
   workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: '发布已有成功构建：填写 Actions run ID；留空则重新编译'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -24,6 +29,7 @@ env:
 
 jobs:
   build:
+    if: inputs.artifact_run_id == ''
     name: Build ${{ matrix.platform }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -524,3 +530,92 @@ jobs:
         overwrite: true
         if-no-files-found: error
         retention-days: 30
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: ${{ !cancelled() && !failure() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN_ID: ${{ inputs.artifact_run_id || github.run_id }}
+    steps:
+    - name: 核对安装包来源
+      id: source
+      shell: bash
+      run: |
+        set -euo pipefail
+        [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+        gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > "$RUNNER_TEMP/source-run.json"
+        python3 - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'source-run.json').read_text())
+        assert run['path'] == '.github/workflows/build.yaml', 'Not a package build workflow'
+        assert run['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY'], 'Wrong repository'
+        if str(run['id']) != os.environ['GITHUB_RUN_ID']:
+            assert run['conclusion'] == 'success', 'Source build did not succeed'
+        else:
+            assert run['head_sha'] == os.environ['GITHUB_SHA'], 'Wrong source commit'
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write(f"sha={run['head_sha']}\n")
+        PY
+    - name: Checkout package source
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ steps.source.outputs.sha }}
+    - name: 下载 macOS 安装包
+      uses: actions/download-artifact@v4
+      with:
+        name: artifact-macos-arm64
+        path: dist
+        run-id: ${{ env.SOURCE_RUN_ID }}
+        github-token: ${{ github.token }}
+    - name: 下载 Android 安装包
+      uses: actions/download-artifact@v4
+      with:
+        name: artifact-android-arm64
+        path: dist
+        run-id: ${{ env.SOURCE_RUN_ID }}
+        github-token: ${{ github.token }}
+    - name: 发布公开下载
+      env:
+        SOURCE_SHA: ${{ steps.source.outputs.sha }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=$(python3 - <<'PY'
+        import re
+        from pathlib import Path
+        match = re.search(r'^version:\s*(\d+\.\d+\.\d+)', Path('pubspec.yaml').read_text(), re.MULTILINE)
+        if match is None:
+            raise SystemExit('Cannot read package version')
+        print(match.group(1))
+        PY
+        )
+        tag="v${version}-custom.${SOURCE_RUN_ID}"
+        macos="FlClash-${version}-macos-arm64.dmg"
+        android="FlClash-${version}-android-arm64-v8a.apk"
+        test -s "dist/$macos"
+        test -s "dist/$android"
+        (cd dist && sha256sum "$macos" "$android" > SHA256SUMS.txt)
+        cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+        基于上游 v${version} 的自用构建，提供 macOS Apple Silicon 和 Android ARM64 安装包，任何人均可直接下载。
+
+        保留自用设置：测速超时默认 500 ms（可修改）、测速并发默认 40（1–50）、默认测速链接为 ChatGPT trace、关闭 App 自动检查更新及 unified-delay。
+
+        - 源码提交：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$SOURCE_SHA
+        - 构建记录：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID
+        - 文件校验：SHA256SUMS.txt
+        EOF
+        if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" \
+            --title "FlClash v${version} 自用版" --notes-file "$RUNNER_TEMP/release-notes.md" --draft
+        fi
+        gh release upload "$tag" "dist/$macos" "dist/$android" dist/SHA256SUMS.txt \
+          --repo "$GITHUB_REPOSITORY" --clobber
+        gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
